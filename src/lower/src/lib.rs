@@ -56,7 +56,7 @@ impl<'hir> LowerInfo<'hir, '_> {
             self.lower_ctor(id);
         }
 
-        for item in self.hir.execs() {
+        for item in self.hir.defs() {
             let item = self.lower_item(item);
             self.mir.add_item(item);
         }

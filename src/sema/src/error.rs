@@ -5,6 +5,7 @@ use std::{
 
 use errors::{Diagnostic, Report};
 use ident::Ident;
+use irs::hir::TyId;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -17,6 +18,15 @@ pub enum ErrorKind {
     DupFields(Ident),
     InvalidMain,
     SelfOutsideImpl,
+    TypeMismatch { expected: TyId, found: TyId },
+    MutMismatch { should_be_mut: bool },
+    Infinite,
+    UninferredExprType,
+    UninferredVarType,
+    NoSuchField(Ident, Ident),
+    NoSuchMethod(TyId, Ident),
+    NoFieldsType(TyId),
+    OpaqueType(Ident),
 }
 
 impl Diagnostic for ErrorKind {
@@ -41,6 +51,30 @@ impl Diagnostic for ErrorKind {
                 .with_note("the main function must take no parameters and have a unit return type"),
             Self::SelfOutsideImpl => Report::error("self parameter on free function")
                 .with_note("self parameters can only appear on functions within impl blocks"),
+            Self::TypeMismatch { expected, found } => Report::error("mismatched types")
+                .with_label(format!("expected type {expected:?}, found type {found:?}")),
+            Self::MutMismatch { should_be_mut } => {
+                let report = Report::error("incorrect argument mutability");
+                if should_be_mut {
+                    report.with_label("argument should be mutable")
+                } else {
+                    report.with_label("argument should not be mutable")
+                }
+            }
+            Self::Infinite => Report::error("infinite type")
+                .with_label("the type of this expression recurses infinitely"),
+            Self::UninferredExprType => Report::error("uninferred type")
+                .with_label("could not infer a concrete type for this expression"),
+            Self::UninferredVarType => Report::error("uninferred type")
+                .with_label("could not infer a concrete type for this variable"),
+            Self::NoSuchField(ty, field) => Report::error("field not found")
+                .with_label(format!("type {ty} does not have a field named {field}")),
+            Self::NoSuchMethod(ty, method) => Report::error("method not found")
+                .with_label(format!("type {ty:?} does not have a method named {method}")),
+            Self::NoFieldsType(ty) => Report::error("field access on type with no fields")
+                .with_label(format!("type {ty:?} does not have fields")),
+            Self::OpaqueType(ident) => Report::error("field not accessible")
+                .with_label(format!("type `{ident}` is opaque")),
         }
     }
 }

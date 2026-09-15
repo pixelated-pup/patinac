@@ -1,9 +1,6 @@
 //! Performs typechecking on the [`Hir`], producing a mapping of expressions to their types, and filling in the Hir's mapping of variables to types.
 
-mod error;
-mod infer;
 mod substitute;
-mod types;
 mod unify;
 
 use std::range::Range;
@@ -23,18 +20,8 @@ use crate::types::{PartialTy, TyVar};
 type Table = InPlaceUnificationTable<TyVar>;
 
 struct TypeChecker<'handler> {
-    table: Table,
-    constraints: Vec<Constraint>,
     substitution: SecondaryMap<ExprId, (PartialTy, ModuleId)>,
     ctx: SecondaryMap<VarId, PartialTy>,
-    handler: ErrorHandler<'handler>,
-}
-
-#[derive(Debug)]
-enum Constraint {
-    Eq(PartialTy, PartialTy, Range<u32>, ModuleId),
-    Field(PartialTy, Range<u32>, PartialTy, SpanIdent, ModuleId),
-    Method(PartialTy, Range<u32>, PartialTy, SpanIdent, ModuleId),
 }
 
 /// Runs typechecking on the provided [`Hir`], reporting errors through the provided [`ErrorHandler`].
@@ -50,7 +37,7 @@ pub fn type_hir(hir: &mut Hir, handler: ErrorHandler<'_>) -> Result<SecondaryMap
         handler,
     };
 
-    for exec in hir.execs() {
+    for exec in hir.defs() {
         match &exec.kind {
             DefKind::Const(val) => {
                 let initialiser_ty = checker.infer_expr(hir, exec.module, *val);
@@ -83,55 +70,4 @@ pub fn type_hir(hir: &mut Hir, handler: ErrorHandler<'_>) -> Result<SecondaryMap
     checker.unify(hir);
 
     checker.sub_all(hir)
-}
-
-impl TypeChecker<'_> {
-    fn var_ty(&mut self, hir: &Hir, var: VarId) -> &PartialTy {
-        let table = &mut self.table;
-        self.ctx
-            .entry(var)
-            .expect("keys are never removed from the context")
-            .or_insert_with(|| types::convert(table, hir.try_var_ty(var)))
-    }
-
-    fn constrain_eq(
-        &mut self,
-        ty_a: PartialTy,
-        ty_b: PartialTy,
-        span: Range<u32>,
-        module: ModuleId,
-    ) {
-        self.constraints
-            .push(Constraint::Eq(ty_a, ty_b, span, module));
-    }
-
-    fn constrain_field(
-        &mut self,
-        base_ty: PartialTy,
-        base_span: Range<u32>,
-        field_ty: PartialTy,
-        field_name: SpanIdent,
-        module: ModuleId,
-    ) {
-        self.constraints.push(Constraint::Field(
-            base_ty, base_span, field_ty, field_name, module,
-        ));
-    }
-
-    fn constrain_method(
-        &mut self,
-        base_ty: PartialTy,
-        base_span: Range<u32>,
-        method_ty: PartialTy,
-        method_name: SpanIdent,
-        module: ModuleId,
-    ) {
-        self.constraints.push(Constraint::Method(
-            base_ty,
-            base_span,
-            method_ty,
-            method_name,
-            module,
-        ));
-    }
 }

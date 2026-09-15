@@ -3,7 +3,7 @@ use ident::Ident;
 use irs::{
     ModuleId, Package,
     ast::PathSlice,
-    hir::{Ty, TyId, VarId},
+    hir::{TyId, VarId},
 };
 use slotmap::SecondaryMap;
 
@@ -15,7 +15,7 @@ pub struct ScopeInfo<'pkg> {
     module: ModuleId,
     local_stack: Vec<HashMap<Ident, VarId>>,
     modules: SecondaryMap<ModuleId, ModuleScope>,
-    assocs: HashMap<(Ty, Ident), (Visibility, VarId)>,
+    assocs: HashMap<(TyId, Ident), (Visibility, VarId)>,
 }
 
 impl<'pkg> ScopeInfo<'pkg> {
@@ -80,7 +80,7 @@ impl<'pkg> ScopeInfo<'pkg> {
 
     pub fn add_assoc_def(
         &mut self,
-        ty: Ty,
+        ty: TyId,
         vis: Visibility,
         ident: Ident,
         id: VarId,
@@ -117,7 +117,7 @@ impl<'pkg> ScopeInfo<'pkg> {
                 let def = match self.resolve_module(head) {
                     Ok(module) => self.modules[module].get_def(tail),
                     Err(_) => match self.resolve_ty(head) {
-                        Ok(ty) => self.assocs.get(&(Ty::Named(ty), tail)).copied(),
+                        Ok(ty) => self.assocs.get(&(ty, tail)).copied(),
                         Err(_) => {
                             return Err(ErrorKind::UnknownName(ItemKind::Module, head.last()));
                         }
