@@ -1,8 +1,12 @@
 //! The high-level intermediate representation of Patina. Produced after name resolution, and used for typechecking.
 
-use std::range::Range;
+use std::{
+    fmt::{self, Display, Formatter},
+    range::Range,
+};
 
-use ena::unify::{EqUnifyValue, UnifyKey};
+use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey};
+use foldhash::HashMap;
 use indexmap::IndexSet;
 use slotmap::{SecondaryMap, SlotMap, new_key_type};
 
@@ -16,7 +20,8 @@ pub struct Hir {
     main: Option<DefItem>,
     defs: Vec<DefItem>,
     tys: IndexSet<TyKind, foldhash::fast::RandomState>,
-    exprs: SlotMap<ExprId, (Expr, Range<u32>, TyId)>,
+    table: InPlaceUnificationTable<TyVar>,
+    exprs: SlotMap<ExprId, Expr>,
     vars: SlotMap<VarId, VarInfo>,
 }
 
@@ -44,11 +49,6 @@ impl Hir {
 
 // Type-related functions
 impl Hir {
-    /// Returns an iterator over all user-defined types.
-    // pub fn tys(&self) -> impl Iterator<Item = TyId> {
-    //     self.tys.keys()
-    // }
-
     pub fn intern_ty(&mut self, kind: TyKind) -> TyId {
         match self.tys.get_index_of(&kind) {
             Some(index) => TyId(index),
@@ -58,6 +58,11 @@ impl Hir {
                 TyId(index)
             }
         }
+    }
+
+    /// Returns an iterator over all the interned types.
+    pub fn tys(&self) -> impl Iterator<Item = &TyKind> {
+        self.tys.iter()
     }
 
     /// Shorthand for `self.intern_ty(TyKind::Int)`
@@ -91,7 +96,11 @@ impl Hir {
     }
 
     pub fn ty_kind(&self, id: TyId) -> &TyKind {
-        self.tys.get_index(id.0).expect("Invalid ID")
+        match self.tys.get_index(id.0).expect("Invalid ID") {
+            TyKind::Var(var) => todo!(),
+            TyKind::IntVar(var) => todo!(),
+            kind => kind,
+        }
     }
 
     // /// Reserves a user-defined type, storing only it's name and returning a unique ID for it.
@@ -135,23 +144,22 @@ impl Hir {
 // Expr-related functions
 impl Hir {
     /// Adds a spanned expression, returning a unique ID for it.
-    pub fn add_expr(&mut self, expr: Expr, span: impl Into<Range<u32>>, ty: TyId) -> ExprId {
-        self.exprs.insert((expr, span.into(), ty))
+    pub fn add_expr(&mut self, kind: ExprKind, span: impl Into<Range<u32>>, ty: TyId) -> ExprId {
+        self.exprs.insert(Expr {
+            kind,
+            ty,
+            span: span.into(),
+        })
     }
 
-    /// Returns the actual expression associated with the given ID.
+    /// Returns the expression associated with the given ID.
     pub fn expr(&self, id: ExprId) -> &Expr {
-        &self.exprs[id].0
+        &self.exprs[id]
     }
 
-    /// Returns the span of the expression associated with the given ID.
-    pub fn expr_span(&self, id: ExprId) -> Range<u32> {
-        self.exprs[id].1
-    }
-
-    /// Returns the type of the expression associated with the given ID.
-    pub fn expr_ty(&self, id: ExprId) -> TyId {
-        self.exprs[id].2
+    /// Returns an iterator over all the expressions.
+    pub fn exprs(&self) -> impl Iterator<Item = &Expr> {
+        self.exprs.values()
     }
 }
 
@@ -215,9 +223,18 @@ new_key_type! {
     /// An ID corresponding to an [`Expr`].
     pub struct ExprId;
 }
-/// An expression.
+
+/// An expression, with type and span information.
 #[derive(Debug, PartialEq)]
-pub enum Expr {
+pub struct Expr {
+    pub kind: ExprKind,
+    pub ty: TyId,
+    pub span: Range<u32>,
+}
+
+/// The kinds of expressions.
+#[derive(Debug, PartialEq)]
+pub enum ExprKind {
     /// A reference to a named value.
     Var(VarId),
     /// A scalar literal value. The specific kinds of literals are represented by [`LitExpr`].
@@ -436,6 +453,8 @@ pub enum TyKind {
     Func(Vec<Param>, TyId),
     /// A user-defined type, such as a `record` or `union`.
     Named {
+        /// The name of the type.
+        ident: Ident,
         /// Whether the type is opaque (meaning it's fields/variants are private).
         opaque: bool,
         /// The fields of the type.

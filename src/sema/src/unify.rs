@@ -8,20 +8,23 @@ use irs::{
     hir::{Hir, Param, TyId, TyKind, TyVar},
 };
 
-use crate::{Constraint, Driver, error::ErrorKind};
+use crate::{Constraint, Driver, Table, error::ErrorKind};
 
-type Table = InPlaceUnificationTable<TyVar>;
-
-// unify: constraints, handler, hir
+// unify: handler, hir
 // unify_..._ty: handler, hir
 
 impl Driver<'_, '_> {
-    /// Unifies all types in the unification table.
-    pub(super) fn unify(&self) {
+    /// Constructs a unification table n
+    pub(super) fn unify(&self, constraints: &[Constraint]) -> Table {
         let mut table = Table::new();
 
-        for &constr in &self.constraints {
-            match constr {
+        // Set up all the variables we expect to exist
+        for _ in 0..self.var_counter {
+            table.new_key(None);
+        }
+
+        for &constraint in constraints {
+            match constraint {
                 Constraint::Eq(ty_a, ty_b, span, module) => {
                     self.unify_ty_ty(&mut table, span, module, ty_a, ty_b);
                 }
@@ -42,6 +45,8 @@ impl Driver<'_, '_> {
                 }
             }
         }
+
+        table
     }
 
     /// Recursively traverse two types until at least one is a type variable,
@@ -53,12 +58,11 @@ impl Driver<'_, '_> {
         table: &mut Table,
         span: Range<u32>,
         module: ModuleId,
-        unnorm_lhs: TyId,
-        unnorm_rhs: TyId,
+        lhs: TyId,
+        rhs: TyId,
     ) {
-        let lhs = normalize_ty(table, unnorm_lhs);
-        let rhs = normalize_ty(table, unnorm_rhs);
-
+        let lhs = self.normalised_ty(table, lhs);
+        let rhs = self.normalised_ty(table, rhs);
         match (self.hir.ty_kind(lhs), self.hir.ty_kind(rhs)) {
             (TyKind::Int, TyKind::Int)
             | (TyKind::UInt, TyKind::UInt)
@@ -67,14 +71,7 @@ impl Driver<'_, '_> {
             | (TyKind::Bool, TyKind::Bool) => {}
             (TyKind::Tuple(lhs_elems), TyKind::Tuple(rhs_elems)) => {
                 if lhs_elems.len() != rhs_elems.len() {
-                    self.handler.report(
-                        ErrorKind::TypeMismatch {
-                            expected: lhs,
-                            found: rhs,
-                        },
-                        span,
-                        module,
-                    );
+                    self.report_type_mismatch(lhs, rhs, span, module);
                     return;
                 }
                 for (&l, &r) in iter::zip(lhs_elems, rhs_elems) {
@@ -101,37 +98,30 @@ impl Driver<'_, '_> {
                 TyKind::Var(lhs_var) | TyKind::IntVar(lhs_var),
                 TyKind::Var(rhs_var) | TyKind::IntVar(rhs_var),
             ) => {
-                unify_var_var(table, &self.handler, span, module, *lhs_var, *rhs_var);
+                self.unify_var_var(table, span, module, *lhs_var, *rhs_var);
             }
             (&TyKind::Var(var), _) => {
                 if occurs_check(&self.hir, rhs, var) {
                     self.handler.report(ErrorKind::Infinite, span, module);
                     return;
                 }
-                unify_var_value(table, &self.handler, span, module, var, rhs);
+                self.unify_var_value(table, span, module, var, rhs);
             }
             (_, &TyKind::Var(var)) => {
                 if occurs_check(&self.hir, lhs, var) {
                     self.handler.report(ErrorKind::Infinite, span, module);
                     return;
                 }
-                unify_var_value(table, &self.handler, span, module, var, lhs);
+                self.unify_var_value(table, span, module, var, lhs);
             }
             (TyKind::IntVar(int_var), TyKind::Int | TyKind::UInt | TyKind::Byte) => {
-                unify_var_value(table, &self.handler, span, module, *int_var, rhs)
+                self.unify_var_value(table, span, module, *int_var, rhs)
             }
             (TyKind::Int | TyKind::UInt | TyKind::Byte, TyKind::IntVar(int_var)) => {
-                unify_var_value(table, &self.handler, span, module, *int_var, lhs)
+                self.unify_var_value(table, span, module, *int_var, lhs)
             }
             (_, _) => {
-                self.handler.report(
-                    ErrorKind::TypeMismatch {
-                        expected: lhs,
-                        found: rhs,
-                    },
-                    span,
-                    module,
-                );
+                self.report_type_mismatch(lhs, rhs, span, module);
             }
         }
     }
@@ -145,47 +135,50 @@ impl Driver<'_, '_> {
         field_name: SpanIdent,
         module: ModuleId,
     ) {
-        let base_ty = normalize_ty(table, base_ty);
+        let base_ty = self.normalised_ty(table, base_ty);
+        match self.hir.ty_kind(base_ty) {
+            TyKind::Named {
+                ident,
+                opaque,
+                fields,
+                module: ty_module,
+                ..
+            } => {
+                if *opaque && *ty_module != module {
+                    self.handler
+                        .report(ErrorKind::OpaqueType(*ident), base_span, module);
+                    return;
+                }
 
-        let base_id = match base_ty {
-            TyKind::Named(id) => id,
+                let Some(field) = fields
+                    .iter()
+                    .find(|field| field.ident.ident == field_name.ident)
+                else {
+                    self.handler.report(
+                        ErrorKind::NoSuchField(*ident, field_name.ident),
+                        field_name.span,
+                        module,
+                    );
+                    return;
+                };
+
+                let ty = field.ty;
+                self.unify_ty_ty(table, field_name.span, module, field_ty, ty);
+            }
             TyKind::Var(_) => {
-                handler.report(ErrorKind::UninferredVarType, base_span, module);
+                self.handler
+                    .report(ErrorKind::UninferredVarType, base_span, module);
                 return;
             }
-            no_fields_ty => {
-                handler.report(ErrorKind::NoFieldsType(no_fields_ty), base_span, module);
+            _ => {
+                self.handler.report(
+                    ErrorKind::NoFieldsType(self.show_type(base_ty)),
+                    base_span,
+                    module,
+                );
                 return;
             }
-        };
-
-        let ty_info = hir.ty_info(base_id);
-
-        if ty_info.opaque && ty_info.module != module {
-            handler.report(
-                ErrorKind::OpaqueType(hir.ty_ident(base_id).ident),
-                base_span,
-                module,
-            );
-            return;
         }
-
-        let Some(field) = ty_info.get_field(field_name.ident) else {
-            self.handler.report(
-                ErrorKind::NoSuchField(hir.ty_ident(base_id).ident, field_name.ident),
-                field_name.span,
-                module,
-            );
-            return;
-        };
-
-        self.unify_ty_ty(
-            table,
-            field_name.span,
-            module,
-            field_ty,
-            &TyKind::from(&field.ty),
-        );
     }
 
     fn unify_method_ty(
@@ -197,105 +190,53 @@ impl Driver<'_, '_> {
         method_name: SpanIdent,
         module: ModuleId,
     ) {
-        let Ok(base_ty) = Ty::try_from(normalize_ty(table, base_ty)) else {
-            self.handler
-                .report(ErrorKind::UninferredVarType, base_span, module);
-            return;
-        };
-
         todo!("Method Resolution")
-        // let Some(field) = hir.ty_info(base_id).fields.get(&field_name.ident) else {
-        //     return Err(
-        //         ErrorKind::MissingField(base_ty, field_name.ident).span(field_name.span, module)
-        //     );
-        // };
-
-        // unify_ty_ty(
-        //     table,
-        //     field_name.span,
-        //     module,
-        //     field_ty,
-        //     &TyKind::from(&field.ty),
-        // )
     }
-}
 
-fn unify_var_var(
-    table: &mut Table,
-    handler: &ErrorHandler,
-    span: Range<u32>,
-    module: ModuleId,
-    l: TyVar,
-    r: TyVar,
-) {
-    if let Err((l, r)) = table.unify_var_var(l, r) {
-        handler.report(
+    fn unify_var_var(
+        &self,
+        table: &mut Table,
+        span: Range<u32>,
+        module: ModuleId,
+        lhs: TyVar,
+        rhs: TyVar,
+    ) {
+        if let Err((lhs, rhs)) = table.unify_var_var(lhs, rhs) {
+            self.report_type_mismatch(lhs, rhs, span, module);
+        }
+    }
+
+    fn unify_var_value(
+        &self,
+        table: &mut Table,
+        span: Range<u32>,
+        module: ModuleId,
+        var: TyVar,
+        ty: TyId,
+    ) {
+        if let Err((l, r)) = table.unify_var_value(var, Some(ty)) {
+            self.report_type_mismatch(l, r, span, module);
+        }
+    }
+
+    fn normalised_ty(&self, table: &mut Table, ty: TyId) -> TyId {
+        match self.hir.ty_kind(ty) {
+            TyKind::Var(v) | TyKind::IntVar(v) => table.probe_value(*v).unwrap_or(ty),
+            _ => ty,
+        }
+    }
+
+    fn report_type_mismatch(&self, lhs: TyId, rhs: TyId, span: Range<u32>, module: ModuleId) {
+        let lhs = self.show_type(lhs);
+        let rhs = self.show_type(rhs);
+        self.handler.report(
             ErrorKind::TypeMismatch {
-                expected: l,
-                found: r,
+                expected: lhs,
+                found: rhs,
             },
             span,
             module,
         );
-    }
-}
-
-fn unify_var_value(
-    table: &mut Table,
-    handler: &ErrorHandler,
-    span: Range<u32>,
-    module: ModuleId,
-    var: TyVar,
-    ty: TyId,
-) {
-    if let Err((l, r)) = table.unify_var_value(var, Some(ty)) {
-        handler.report(
-            ErrorKind::TypeMismatch {
-                expected: l,
-                found: r,
-            },
-            span,
-            module,
-        );
-    }
-}
-
-fn normalize_ty(hir: &mut Hir, table: &mut Table, ty: TyId) -> TyId {
-    match hir.ty_kind(ty) {
-        TyKind::Int
-        | TyKind::UInt
-        | TyKind::Byte
-        | TyKind::Float
-        | TyKind::Bool
-        | TyKind::Named { .. } => ty,
-        TyKind::Tuple(tys) => {
-            let tys = tys
-                .iter()
-                .copied()
-                .map(|ty| normalize_ty(hir, table, ty))
-                .collect();
-            hir.intern_ty(TyKind::Tuple(tys))
-        }
-        TyKind::Func(params, result) => {
-            let params = params
-                .iter()
-                .copied()
-                .map(|param| Param {
-                    ty: normalize_ty(hir, table, param.ty),
-                    mutable: param.mutable,
-                })
-                .collect();
-            let result = normalize_ty(hir, table, *result);
-            hir.intern_ty(TyKind::Func(params, result))
-        }
-        TyKind::Var(v) => match table.probe_value(*v) {
-            Some(ty) => normalize_ty(hir, table, ty),
-            None => hir.intern_ty(TyKind::Var(table.find(*v))),
-        },
-        TyKind::IntVar(v) => match table.probe_value(*v) {
-            Some(ty) => normalize_ty(hir, table, ty),
-            None => hir.intern_ty(TyKind::IntVar(table.find(*v))),
-        },
     }
 }
 

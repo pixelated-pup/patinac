@@ -7,13 +7,17 @@ use irs::{
     hir::{self, ExprId, Param, TyId, TyKind, VarId},
 };
 
-use crate::{Driver, ErrorKind};
+use crate::{Constraint, Driver, ErrorKind};
 
 impl Driver<'_, '_> {
-    pub fn resolve_expr(&mut self, expr: &ast::Expr) -> Result<(ExprId, TyId)> {
+    pub fn resolve_expr(
+        &mut self,
+        constraints: &mut Vec<Constraint>,
+        expr: &ast::Expr,
+    ) -> Result<(ExprId, TyId)> {
         let (new_expr, ty) = match &expr.kind {
             ExprKind::Var(path) => match self.scopes.resolve_var(path.as_slice()) {
-                Ok(id) => (hir::Expr::Var(id), self.hir.var_info(id).ty),
+                Ok(id) => (hir::ExprKind::Var(id), self.hir.var_info(id).ty),
                 Err(e) => return Err(self.err(e, expr.span)),
             },
             ExprKind::Lit(lit) => {
@@ -23,38 +27,46 @@ impl Driver<'_, '_> {
                         hir::LitExpr::Float(*f),
                         self.hir.intern_ty(hir::TyKind::Float),
                     ),
-                    ast::LitExpr::String(s) => {
-                        (hir::LitExpr::String(s.clone()), todo!("String type"))
-                    }
+                    ast::LitExpr::String(s) => todo!("Strings"),
                     ast::LitExpr::Bool(b) => (
                         hir::LitExpr::Bool(*b),
                         self.hir.intern_ty(hir::TyKind::Bool),
                     ),
                 };
-                (hir::Expr::Lit(lit), ty)
+                (hir::ExprKind::Lit(lit), ty)
             }
             ExprKind::Tuple(exprs) => {
-                let (exprs, tys) = self.resolve_exprs(exprs)?;
+                let (exprs, tys) = self.resolve_exprs(constraints, exprs)?;
                 (
-                    hir::Expr::Tuple(exprs),
+                    hir::ExprKind::Tuple(exprs),
                     self.hir.intern_ty(hir::TyKind::Tuple(tys)),
                 )
             }
             ExprKind::Infix { op, lhs, rhs } => {
-                let rhs = self.resolve_expr(rhs);
-                let (lhs, lhs_ty) = self.resolve_expr(lhs)?;
+                let rhs = self.resolve_expr(constraints, rhs);
+                let (lhs, lhs_ty) = self.resolve_expr(constraints, lhs)?;
                 let (rhs, rhs_ty) = rhs?;
                 match convert_infix_op(*op) {
                     Some(op) => {
-                        let expr = hir::Expr::Infix { op, lhs, rhs };
+                        let expr = hir::ExprKind::Infix { op, lhs, rhs };
                         let ty = match op {
                             hir::InfixOp::Add
                             | hir::InfixOp::Sub
                             | hir::InfixOp::Mul
                             | hir::InfixOp::Div => {
-                                let int_var = PartialTy::int_var(&mut self.table);
-                                self.constrain_eq(lhs_ty, int_var.clone(), self.hir.expr_span(lhs));
-                                self.constrain_eq(rhs_ty, int_var.clone(), self.hir.expr_span(rhs));
+                                let int_var = self.fresh_int_ty_var();
+                                constraints.push(Constraint::Eq(
+                                    lhs_ty,
+                                    int_var,
+                                    self.hir.expr(lhs).span,
+                                    self.scopes.module(),
+                                ));
+                                constraints.push(Constraint::Eq(
+                                    rhs_ty,
+                                    int_var,
+                                    self.hir.expr(rhs).span,
+                                    self.scopes.module(),
+                                ));
                                 int_var
                             }
                             hir::InfixOp::AddF
@@ -62,25 +74,59 @@ impl Driver<'_, '_> {
                             | hir::InfixOp::MulF
                             | hir::InfixOp::DivF => {
                                 let float = self.hir.float();
-                                self.constrain_eq(lhs_ty, float, self.hir.expr_span(lhs));
-                                self.constrain_eq(rhs_ty, float, self.hir.expr_span(rhs));
+                                constraints.push(Constraint::Eq(
+                                    lhs_ty,
+                                    float,
+                                    self.hir.expr(lhs).span,
+                                    self.scopes.module(),
+                                ));
+                                constraints.push(Constraint::Eq(
+                                    rhs_ty,
+                                    float,
+                                    self.hir.expr(rhs).span,
+                                    self.scopes.module(),
+                                ));
                                 float
                             }
                             hir::InfixOp::Exp => {
                                 let float = self.hir.float();
-                                self.constrain_eq(lhs_ty, float, self.hir.expr_span(lhs));
-                                let int_var = PartialTy::int_var(&mut self.table);
-                                self.constrain_eq(rhs_ty, int_var, self.hir.expr_span(rhs));
+                                constraints.push(Constraint::Eq(
+                                    lhs_ty,
+                                    float,
+                                    self.hir.expr(lhs).span,
+                                    self.scopes.module(),
+                                ));
+                                constraints.push(Constraint::Eq(
+                                    rhs_ty,
+                                    self.fresh_int_ty_var(),
+                                    self.hir.expr(rhs).span,
+                                    self.scopes.module(),
+                                ));
                                 float
                             }
                             hir::InfixOp::And | hir::InfixOp::Or => {
                                 let bool = self.hir.bool();
-                                self.constrain_eq(lhs_ty, bool, self.hir.expr_span(lhs));
-                                self.constrain_eq(rhs_ty, bool, self.hir.expr_span(rhs));
+                                constraints.push(Constraint::Eq(
+                                    lhs_ty,
+                                    bool,
+                                    self.hir.expr(lhs).span,
+                                    self.scopes.module(),
+                                ));
+                                constraints.push(Constraint::Eq(
+                                    rhs_ty,
+                                    bool,
+                                    self.hir.expr(rhs).span,
+                                    self.scopes.module(),
+                                ));
                                 bool
                             }
                             hir::InfixOp::Eqq | hir::InfixOp::Neq => {
-                                self.constrain_eq(rhs_ty, lhs_ty, self.hir.expr_span(rhs));
+                                constraints.push(Constraint::Eq(
+                                    rhs_ty,
+                                    lhs_ty,
+                                    self.hir.expr(rhs).span,
+                                    self.scopes.module(),
+                                ));
                                 self.hir.bool()
                             }
                             hir::InfixOp::Gt
@@ -88,8 +134,18 @@ impl Driver<'_, '_> {
                             | hir::InfixOp::Geq
                             | hir::InfixOp::Leq => {
                                 let float = self.hir.float();
-                                self.constrain_eq(lhs_ty, float, self.hir.expr_span(lhs));
-                                self.constrain_eq(rhs_ty, float, self.hir.expr_span(rhs));
+                                constraints.push(Constraint::Eq(
+                                    lhs_ty,
+                                    float,
+                                    self.hir.expr(lhs).span,
+                                    self.scopes.module(),
+                                ));
+                                constraints.push(Constraint::Eq(
+                                    rhs_ty,
+                                    float,
+                                    self.hir.expr(rhs).span,
+                                    self.scopes.module(),
+                                ));
                                 self.hir.intern_ty(TyKind::Bool)
                             }
                         };
@@ -97,9 +153,14 @@ impl Driver<'_, '_> {
                     }
                     None => {
                         self.assert_is_place(lhs);
-                        self.constrain_eq(rhs_ty, lhs_ty, self.hir.expr_span(lhs));
+                        constraints.push(Constraint::Eq(
+                            rhs_ty,
+                            lhs_ty,
+                            self.hir.expr(lhs).span,
+                            self.scopes.module(),
+                        ));
                         (
-                            hir::Expr::Assign {
+                            hir::ExprKind::Assign {
                                 place: lhs,
                                 value: rhs,
                             },
@@ -109,28 +170,44 @@ impl Driver<'_, '_> {
                 }
             }
             ExprKind::Prefix { op, expr } => {
-                let (expr, expr_ty) = self.resolve_expr(expr)?;
+                let (expr, expr_ty) = self.resolve_expr(constraints, expr)?;
                 let (ty, op) = match op {
                     ast::PrefixOp::Not => {
                         let bool = self.hir.bool();
-                        self.constrain_eq(expr_ty, bool, self.hir.expr_span(expr));
+                        constraints.push(Constraint::Eq(
+                            expr_ty,
+                            bool,
+                            self.hir.expr(expr).span,
+                            self.scopes.module(),
+                        ));
                         (bool, hir::PrefixOp::Not)
                     }
                     ast::PrefixOp::Neg => {
                         let float = self.hir.float();
-                        self.constrain_eq(expr_ty, float, self.hir.expr_span(expr));
+                        constraints.push(Constraint::Eq(
+                            expr_ty,
+                            float,
+                            self.hir.expr(expr).span,
+                            self.scopes.module(),
+                        ));
                         (float, hir::PrefixOp::Neg)
                     }
                 };
-                (hir::Expr::Prefix { op, expr }, ty)
+                (hir::ExprKind::Prefix { op, expr }, ty)
             }
             ExprKind::Field { base, field } => {
-                let (base, base_ty) = self.resolve_expr(base)?;
-                let field_ty = PartialTy::var(&mut self.table);
-                self.constrain_field(base_ty, self.hir.expr_span(base), field_ty.clone(), *field);
+                let (base, base_ty) = self.resolve_expr(constraints, base)?;
+                let field_ty = self.fresh_ty_var();
+                constraints.push(Constraint::Field(
+                    base_ty,
+                    self.hir.expr(base).span,
+                    field_ty,
+                    *field,
+                    self.scopes.module(),
+                ));
                 // TODO: de-stringify field name
                 (
-                    hir::Expr::Field {
+                    hir::ExprKind::Field {
                         base,
                         field: *field,
                     },
@@ -138,38 +215,43 @@ impl Driver<'_, '_> {
                 )
             }
             ExprKind::Call { func, args } => {
-                let func = self.resolve_expr(func);
-                let (args, arg_tys) = self.resolve_call_args(args)?;
+                let func = self.resolve_expr(constraints, func);
+                let (args, arg_tys) = self.resolve_call_args(constraints, args)?;
 
                 let (func, func_ty) = func?;
 
-                let ret_ty = PartialTy::var(&mut self.table);
-                self.constrain_eq(
+                let ret_ty = self.fresh_ty_var();
+                constraints.push(Constraint::Eq(
                     func_ty,
                     self.hir.intern_ty(TyKind::Func(arg_tys, ret_ty)),
-                    self.hir.expr_span(func),
-                );
+                    self.hir.expr(func).span,
+                    self.scopes.module(),
+                ));
 
-                (hir::Expr::Call { func, args }, ret_ty)
+                (hir::ExprKind::Call { func, args }, ret_ty)
             }
             ExprKind::MethodCall { base, method, args } => {
-                let base = self.resolve_expr(base);
-                let (args, arg_tys) = self.resolve_call_args(args)?;
+                let base = self.resolve_expr(constraints, base);
+                let (args, arg_tys) = self.resolve_call_args(constraints, args)?;
                 let (base, base_ty) = base?;
 
-                let ret_ty = PartialTy::var(&mut self.table);
-                self.constrain_method(
+                let ret_ty = self.fresh_ty_var();
+                constraints.push(Constraint::Method(
                     base_ty,
-                    self.hir.expr_span(base),
+                    self.hir.expr(base).span,
                     self.hir.intern_ty(TyKind::Func(arg_tys, ret_ty)),
                     *method,
-                );
+                    self.scopes.module(),
+                ));
 
-                hir::Expr::MethodCall {
-                    base,
-                    method: *method,
-                    args,
-                }
+                (
+                    hir::ExprKind::MethodCall {
+                        base,
+                        method: *method,
+                        args,
+                    },
+                    ret_ty,
+                )
             }
             ExprKind::Lambda { params, body } => {
                 self.scopes.push_scope();
@@ -204,14 +286,14 @@ impl Driver<'_, '_> {
                         ))
                     })
                     .try_collect_eager();
-                let (body, body_ty) = self.resolve_expr(body)?;
+                let (body, body_ty) = self.resolve_expr(constraints, body)?;
                 let (params, param_tys) = params?;
 
                 self.scopes.pop_scope();
 
                 let ty = self.hir.intern_ty(TyKind::Func(param_tys, body_ty));
                 (
-                    hir::Expr::Lambda {
+                    hir::ExprKind::Lambda {
                         params,
                         body,
                         captures,
@@ -220,23 +302,28 @@ impl Driver<'_, '_> {
                 )
             }
             ExprKind::If { cond, th, el } => {
-                let cond = self.resolve_expr(cond);
-                let th = self.resolve_block_expr(th);
+                let cond = self.resolve_expr(constraints, cond);
+                let th = self.resolve_block_expr(constraints, th);
                 let el = el
                     .as_ref()
-                    .map(|el| self.resolve_block_expr(el))
+                    .map(|el| self.resolve_block_expr(constraints, el))
                     .transpose()?;
                 let (th, th_ty) = th?;
                 let (cond, cond_ty) = cond?;
 
-                self.constrain_eq(cond_ty, self.hir.bool(), self.hir.expr_span(cond));
+                constraints.push(Constraint::Eq(
+                    cond_ty,
+                    self.hir.bool(),
+                    self.hir.expr(cond).span,
+                    self.scopes.module(),
+                ));
 
-                if let Some((el, el_ty)) = el {
-                    self.constrain_eq(el_ty, th_ty, el.span);
+                if let Some((el, el_ty)) = &el {
+                    constraints.push(Constraint::Eq(*el_ty, th_ty, el.span, self.scopes.module()));
                 }
 
                 (
-                    hir::Expr::If {
+                    hir::ExprKind::If {
                         cond,
                         th,
                         el: el.map(|(el, _)| el),
@@ -245,21 +332,21 @@ impl Driver<'_, '_> {
                 )
             }
             ExprKind::Match { .. } => todo!("Pattern Matching"),
-            ExprKind::For { pat, iter, body } => todo!("For Loops"),
+            ExprKind::For { .. } => todo!("For Loops"),
             ExprKind::Loop(body) => {
-                let (body, _) = self.resolve_block_expr(body)?;
-                (hir::Expr::Loop(body), self.hir.unit())
+                let (body, _) = self.resolve_block_expr(constraints, body)?;
+                (hir::ExprKind::Loop(body), self.hir.unit())
             }
             ExprKind::Break => todo!(),
             ExprKind::Continue => todo!(),
-            ExprKind::Return(expr) => todo!(),
+            ExprKind::Return(_) => todo!(),
             ExprKind::Block(stmts) => {
-                let (stmts, ty) = self.resolve_block_expr(stmts)?;
-                (hir::Expr::Block(stmts), ty)
+                let (stmts, ty) = self.resolve_block_expr(constraints, stmts)?;
+                (hir::ExprKind::Block(stmts), ty)
             }
             ExprKind::Print(expr) => {
-                let (expr, _) = self.resolve_expr(expr)?;
-                (hir::Expr::Print(expr), self.hir.unit())
+                let (expr, _) = self.resolve_expr(constraints, expr)?;
+                (hir::ExprKind::Print(expr), self.hir.unit())
             }
         };
 
@@ -267,14 +354,22 @@ impl Driver<'_, '_> {
         Ok((expr, ty))
     }
 
-    fn resolve_exprs(&mut self, exprs: &[ast::Expr]) -> Result<(Vec<ExprId>, Vec<TyId>)> {
+    fn resolve_exprs(
+        &mut self,
+        constraints: &mut Vec<Constraint>,
+        exprs: &[ast::Expr],
+    ) -> Result<(Vec<ExprId>, Vec<TyId>)> {
         exprs
             .iter()
-            .map(|expr| self.resolve_expr(expr))
+            .map(|expr| self.resolve_expr(constraints, expr))
             .try_collect_eager()
     }
 
-    fn resolve_block_expr(&mut self, block: &ast::BlockExpr) -> Result<(hir::BlockExpr, TyId)> {
+    fn resolve_block_expr(
+        &mut self,
+        constraints: &mut Vec<Constraint>,
+        block: &ast::BlockExpr,
+    ) -> Result<(hir::BlockExpr, TyId)> {
         self.scopes.push_scope();
         let stmts: Vec<_> = block
             .stmts
@@ -287,12 +382,17 @@ impl Driver<'_, '_> {
                 } => {
                     // The value must be resolved before the binding,
                     // to ensure the declared variable isn't in scope within it's own declaration
-                    let value = self.resolve_expr(value);
+                    let value = self.resolve_expr(constraints, value);
                     let var = self.resolve_binding(binding)?;
                     let (value, value_ty) = value?;
 
                     let var_ty = self.hir.var_info(var).ty;
-                    self.constrain_eq(value_ty, var_ty, self.hir.expr_span(value));
+                    constraints.push(Constraint::Eq(
+                        value_ty,
+                        var_ty,
+                        self.hir.expr(value).span,
+                        self.scopes.module(),
+                    ));
 
                     Ok(hir::Stmt::Decl {
                         var,
@@ -301,7 +401,7 @@ impl Driver<'_, '_> {
                     })
                 }
                 ast::Stmt::Expr(expr) => self
-                    .resolve_expr(expr)
+                    .resolve_expr(constraints, expr)
                     .map(|(expr, _)| hir::Stmt::Expr(expr)),
             })
             .try_collect_eager()?;
@@ -311,7 +411,7 @@ impl Driver<'_, '_> {
             .last()
             .and_then(|stmt| match stmt {
                 hir::Stmt::Decl { .. } => None,
-                hir::Stmt::Expr(expr) => Some(self.hir.expr_ty(*expr)),
+                hir::Stmt::Expr(expr) => Some(self.hir.expr(*expr).ty),
             })
             .unwrap_or_else(|| self.hir.unit());
 
@@ -324,11 +424,15 @@ impl Driver<'_, '_> {
         ))
     }
 
-    fn resolve_call_args(&mut self, args: &[ast::Arg]) -> Result<(Vec<hir::Arg>, Vec<hir::Param>)> {
+    fn resolve_call_args(
+        &mut self,
+        constraints: &mut Vec<Constraint>,
+        args: &[ast::Arg],
+    ) -> Result<(Vec<hir::Arg>, Vec<hir::Param>)> {
         let args: Vec<_> = args
             .iter()
             .map(|arg| {
-                let (val, val_ty) = self.resolve_expr(&arg.value)?;
+                let (val, val_ty) = self.resolve_expr(constraints, &arg.value)?;
                 if arg.mutable {
                     self.assert_is_place(val);
                 }
@@ -365,33 +469,33 @@ impl Driver<'_, '_> {
     }
 
     fn assert_is_place(&mut self, place: ExprId) {
-        match self.hir.expr(place) {
-            hir::Expr::Var(id) => {
+        match &self.hir.expr(place).kind {
+            hir::ExprKind::Var(id) => {
                 let info = self.hir.var_info(*id);
                 if !info.mutable {
                     self.err(
                         ErrorKind::Mutation(info.ident.ident),
-                        self.hir.expr_span(place),
+                        self.hir.expr(place).span,
                     );
                 }
             }
-            hir::Expr::Field { base, .. } => self.assert_is_place(*base),
+            hir::ExprKind::Field { base, .. } => self.assert_is_place(*base),
             _ => {
-                self.err(ErrorKind::NotPlaceExpr, self.hir.expr_span(place));
+                self.err(ErrorKind::NotPlaceExpr, self.hir.expr(place).span);
             }
         }
     }
 
     fn overlaps(&self, a: ExprId, b: ExprId) -> bool {
-        match (self.hir.expr(a), self.hir.expr(b)) {
-            (hir::Expr::Var(a), hir::Expr::Var(b)) => a == b,
-            (hir::Expr::Var(_), hir::Expr::Field { base, .. }) => self.overlaps(a, *base),
+        match (&self.hir.expr(a).kind, &self.hir.expr(b).kind) {
+            (hir::ExprKind::Var(a), hir::ExprKind::Var(b)) => a == b,
+            (hir::ExprKind::Var(_), hir::ExprKind::Field { base, .. }) => self.overlaps(a, *base),
             (
-                hir::Expr::Field {
+                hir::ExprKind::Field {
                     base: base_a,
                     field: field_a,
                 },
-                hir::Expr::Field {
+                hir::ExprKind::Field {
                     base: base_b,
                     field: field_b,
                 },

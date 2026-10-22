@@ -5,7 +5,6 @@ use std::{
 
 use errors::{Diagnostic, Report};
 use ident::Ident;
-use irs::hir::TyId;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -18,14 +17,14 @@ pub enum ErrorKind {
     DupFields(Ident),
     InvalidMain,
     SelfOutsideImpl,
-    TypeMismatch { expected: TyId, found: TyId },
+    TypeMismatch { expected: String, found: String },
     MutMismatch { should_be_mut: bool },
     Infinite,
     UninferredExprType,
     UninferredVarType,
     NoSuchField(Ident, Ident),
-    NoSuchMethod(TyId, Ident),
-    NoFieldsType(TyId),
+    NoSuchMethod(String, Ident),
+    NoFieldsType(String),
     OpaqueType(Ident),
 }
 
