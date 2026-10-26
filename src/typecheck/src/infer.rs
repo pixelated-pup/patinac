@@ -1,216 +1,237 @@
-use irs::{
-    ModuleId,
-    hir::{BlockExpr, Expr, ExprId, Hir, InfixOp, LitExpr, PrefixOp, Stmt},
+use std::range::Range;
+
+use ident::SpanIdent;
+use irs::hir::{
+    BlockExpr, ExprId, ExprKind, InfixOp, LitExpr, PrefixOp, Stmt,
+    ty::{Param, Ty, TyId},
 };
 
-use crate::{
-    TypeChecker,
-    types::{Param, PartialTy},
-};
+use crate::{TypeChecker, error::ErrorKind};
 
-impl TypeChecker<'_> {
-    pub(super) fn infer_expr(&mut self, hir: &Hir, module: ModuleId, expr: ExprId) -> PartialTy {
-        let ty = match hir.expr(expr) {
-            Expr::Var(id) => self.var_ty(hir, *id).clone(),
-            Expr::Lit(lit) => match lit {
-                LitExpr::Int(_) => PartialTy::int_var(&mut self.table),
-                LitExpr::Float(_) => PartialTy::Float,
+impl TypeChecker<'_, '_, '_> {
+    pub(super) fn infer_expr(&mut self, expr: ExprId) -> TyId {
+        let expr = self.hir.expr(expr);
+        let module = expr.module;
+        let ty = match &expr.kind {
+            ExprKind::Var(id) => self.hir.var_info(*id).ty,
+            ExprKind::Lit(lit) => match lit {
+                LitExpr::Int(_) => self.ty_ctx.fresh_int_var(),
+                LitExpr::Float(_) => self.ty_ctx.float(),
                 LitExpr::String(_) => todo!("String type"),
-                LitExpr::Bool(_) => PartialTy::Bool,
+                LitExpr::Bool(_) => self.ty_ctx.bool(),
             },
-            Expr::Tuple(exprs) => PartialTy::Tuple(self.infer_exprs(hir, module, exprs)),
-            &Expr::Infix { op, lhs, rhs } => {
-                let lhs_ty = self.infer_expr(hir, module, lhs);
-                let rhs_ty = self.infer_expr(hir, module, rhs);
-                match op {
-                    InfixOp::Add | InfixOp::Sub | InfixOp::Mul | InfixOp::Div => {
-                        let int_var = PartialTy::int_var(&mut self.table);
-                        self.constrain_eq(lhs_ty, int_var.clone(), hir.expr_span(lhs), module);
-                        self.constrain_eq(rhs_ty, int_var.clone(), hir.expr_span(rhs), module);
-                        int_var
-                    }
-                    InfixOp::AddF | InfixOp::SubF | InfixOp::MulF | InfixOp::DivF => {
-                        self.constrain_eq(lhs_ty, PartialTy::Float, hir.expr_span(lhs), module);
-                        self.constrain_eq(rhs_ty, PartialTy::Float, hir.expr_span(rhs), module);
-                        PartialTy::Float
-                    }
-                    InfixOp::Exp => {
-                        self.constrain_eq(lhs_ty, PartialTy::Float, hir.expr_span(lhs), module);
-                        let int_var = PartialTy::int_var(&mut self.table);
-                        self.constrain_eq(rhs_ty, int_var, hir.expr_span(rhs), module);
-                        PartialTy::Float
-                    }
-                    InfixOp::And | InfixOp::Or => {
-                        self.constrain_eq(lhs_ty, PartialTy::Bool, hir.expr_span(lhs), module);
-                        self.constrain_eq(rhs_ty, PartialTy::Bool, hir.expr_span(rhs), module);
-                        PartialTy::Bool
-                    }
-                    InfixOp::Eqq | InfixOp::Neq => {
-                        self.constrain_eq(rhs_ty, lhs_ty, hir.expr_span(rhs), module);
-                        PartialTy::Bool
-                    }
-                    InfixOp::Gt | InfixOp::Lt | InfixOp::Geq | InfixOp::Leq => {
-                        self.constrain_eq(lhs_ty, PartialTy::Float, hir.expr_span(lhs), module);
-                        self.constrain_eq(rhs_ty, PartialTy::Float, hir.expr_span(rhs), module);
-                        PartialTy::Bool
-                    }
-                }
+            ExprKind::Tuple(exprs) => {
+                let elem_tys = self.infer_exprs(exprs);
+                self.ty_ctx.intern_ty(Ty::Tuple(elem_tys))
             }
-            &Expr::Prefix { op, expr } => {
-                let expr_ty = self.infer_expr(hir, module, expr);
-                match op {
-                    PrefixOp::Not => {
-                        self.constrain_eq(expr_ty, PartialTy::Bool, hir.expr_span(expr), module);
-                        PartialTy::Bool
-                    }
-                    PrefixOp::Neg => {
-                        self.constrain_eq(expr_ty, PartialTy::Float, hir.expr_span(expr), module);
-                        PartialTy::Float
-                    }
-                }
-            }
-            &Expr::Field { base, field } => {
-                let base_ty = self.infer_expr(hir, module, base);
-                let field_ty = PartialTy::var(&mut self.table);
-                self.constrain_field(
-                    base_ty,
-                    hir.expr_span(base),
-                    field_ty.clone(),
-                    field,
-                    module,
-                );
-                field_ty
-            }
-            Expr::Call { func, args } => {
-                let func_ty = self.infer_expr(hir, module, *func);
+            ExprKind::Infix { op, lhs, rhs } => self.infer_expr_infix(*op, *lhs, *rhs),
+            ExprKind::Prefix { op, expr } => self.infer_expr_prefix(*op, *expr),
+            ExprKind::Field { base, field } => self.infer_expr_field(*base, *field, expr.span),
+            ExprKind::Call { func, args } => {
                 let arg_tys: Vec<_> = args
                     .iter()
                     .map(|arg| Param {
-                        ty: self.infer_expr(hir, module, arg.value), //PartialTy::var(&mut self.table),
+                        ty: self.infer_expr(arg.value),
                         mutable: arg.mutable,
-                        span: arg.span,
                     })
                     .collect();
-                let ret_ty = PartialTy::var(&mut self.table);
-                self.constrain_eq(
-                    func_ty,
-                    PartialTy::Fn(arg_tys, Box::new(ret_ty.clone())),
-                    hir.expr_span(*func),
-                    module,
-                );
+                let ret_ty = self.ty_ctx.fresh_var();
+                let func_ty = self.ty_ctx.intern_ty(Ty::Func(arg_tys, ret_ty));
+                self.unify_expr_ty(*func, func_ty);
                 ret_ty
             }
-            Expr::MethodCall { base, method, args } => {
-                let base_ty = self.infer_expr(hir, module, *base);
-                let arg_tys = args
+            ExprKind::MethodCall { base, method, args } => {
+                let base_ty = self.infer_expr(*base);
+                let arg_tys: Vec<_> = args
                     .iter()
                     .map(|arg| Param {
-                        ty: self.infer_expr(hir, module, arg.value),
+                        ty: self.infer_expr(arg.value),
                         mutable: arg.mutable,
-                        span: arg.span,
                     })
                     .collect();
-                let ret_ty = PartialTy::var(&mut self.table);
-                self.constrain_method(
-                    base_ty,
-                    hir.expr_span(*base),
-                    PartialTy::Fn(arg_tys, Box::new(ret_ty.clone())),
-                    *method,
-                    module,
-                );
+                let ret_ty = self.ty_ctx.fresh_var();
+                let method_ty = self.ty_ctx.intern_ty(Ty::Func(arg_tys, ret_ty));
+                todo!("Method Resolution");
+                // let Some(field) = self.hir.ty_info(base_id).fields.get(&field_name.ident) else {
+                //     return Err(
+                //         ErrorKind::MissingField(base_ty, field_name.ident).span(field_name.span, module)
+                //     );
+                // };
+
+                // unify_ty_ty(
+                //     table,
+                //     field_name.span,
+                //     module,
+                //     field_ty,
+                //     &Ty::from(&field.ty),
+                // )
                 ret_ty
             }
-            Expr::Lambda {
+            ExprKind::Lambda {
                 params,
                 body,
                 captures,
             } => {
-                for (capture, rebinding) in captures {
-                    let capture_ty = self.var_ty(hir, *capture).clone();
-                    let rebinding_ty = self.var_ty(hir, *rebinding).clone();
-                    self.constrain_eq(
-                        capture_ty,
-                        rebinding_ty,
-                        hir.var_info(*capture).ident.span,
-                        module,
-                    );
-                }
-
                 let param_tys = params
                     .iter()
-                    .map(|id| {
-                        let info = hir.var_info(*id);
+                    .map(|param| {
+                        let info = self.hir.var_info(*param);
                         Param {
-                            ty: self.var_ty(hir, *id).clone(),
+                            ty: info.ty,
                             mutable: info.mutable,
-                            span: info.ident.span,
                         }
                     })
                     .collect();
-                let body_ty = self.infer_expr(hir, module, *body);
-                PartialTy::Fn(param_tys, Box::new(body_ty))
+                let body_ty = self.infer_expr(*body);
+                self.ty_ctx.intern_ty(Ty::Func(param_tys, body_ty))
             }
-            Expr::Assign { place, value } => {
-                let place_ty = self.infer_expr(hir, module, *place);
-                let value_ty = self.infer_expr(hir, module, *value);
-                self.constrain_eq(value_ty, place_ty, hir.expr_span(*value), module);
-                PartialTy::unit()
+            ExprKind::Assign { place, value } => {
+                let place_ty = self.infer_expr(*place);
+                let value_ty = self.infer_expr(*value);
+                self.unify_ty_ty(value_ty, place_ty, self.hir.expr(*value).span, module);
+                self.ty_ctx.unit()
             }
-            Expr::If { cond, th, el } => {
-                let cond_ty = self.infer_expr(hir, module, *cond);
-                self.constrain_eq(cond_ty, PartialTy::Bool, hir.expr_span(*cond), module);
-                let th_ty = self.infer_block_expr(hir, module, th);
+            ExprKind::If { cond, th, el } => {
+                let bool = self.ty_ctx.bool();
+                self.unify_expr_ty(*cond, bool);
+                let th_ty = self.infer_block_expr(th);
                 match el {
                     Some(el) => {
-                        let el_ty = self.infer_block_expr(hir, module, el);
-                        self.constrain_eq(el_ty, th_ty.clone(), el.span, module);
+                        let el_ty = self.infer_block_expr(el);
+                        self.unify_ty_ty(el_ty, th_ty, el.span, module);
                     }
-                    None => self.constrain_eq(th_ty.clone(), PartialTy::unit(), th.span, module),
+                    None => {
+                        let unit = self.ty_ctx.unit();
+                        self.unify_ty_ty(th_ty, unit, th.span, module)
+                    }
                 }
                 th_ty
             }
-            Expr::For { id, iter, body } => {
+            ExprKind::For { id, iter, body } => {
                 todo!()
             }
-            Expr::Loop(body) => {
-                self.infer_block_expr(hir, module, body);
-                PartialTy::unit()
+            ExprKind::Loop(body) => {
+                self.infer_block_expr(body);
+                self.ty_ctx.unit()
             }
-            Expr::Break => todo!(),
-            Expr::Continue => todo!(),
-            Expr::Return(_) => todo!(),
-            Expr::Block(block) => self.infer_block_expr(hir, module, block),
+            ExprKind::Break => todo!(),
+            ExprKind::Continue => todo!(),
+            ExprKind::Return(_) => todo!(),
+            ExprKind::Block(block) => self.infer_block_expr(block),
 
-            Expr::Print(expr) => {
-                let _ = self.infer_expr(hir, module, *expr);
-                PartialTy::unit()
+            ExprKind::Print(expr) => {
+                let _ = self.infer_expr(*expr);
+                self.ty_ctx.unit()
             }
         };
-        self.substitution.insert(expr, (ty.clone(), module));
+        self.unify_ty_ty(ty, expr.ty, expr.span, module);
         ty
     }
 
-    fn infer_exprs(&mut self, hir: &Hir, module: ModuleId, exprs: &[ExprId]) -> Vec<PartialTy> {
-        exprs
-            .iter()
-            .map(|&e| self.infer_expr(hir, module, e))
-            .collect()
+    fn infer_expr_infix(&mut self, op: InfixOp, lhs: ExprId, rhs: ExprId) -> TyId {
+        match op {
+            InfixOp::Add | InfixOp::Sub | InfixOp::Mul | InfixOp::Div => {
+                let int_var = self.ty_ctx.fresh_int_var();
+                self.unify_expr_ty(lhs, int_var);
+                self.unify_expr_ty(rhs, int_var);
+                int_var
+            }
+            InfixOp::AddF | InfixOp::SubF | InfixOp::MulF | InfixOp::DivF => {
+                let float = self.ty_ctx.float();
+                self.unify_expr_ty(lhs, float);
+                self.unify_expr_ty(rhs, float);
+                float
+            }
+            InfixOp::Exp => {
+                let float = self.ty_ctx.float();
+                self.unify_expr_ty(lhs, float);
+                let int_var = self.ty_ctx.fresh_int_var();
+                self.unify_expr_ty(rhs, int_var);
+                float
+            }
+            InfixOp::And | InfixOp::Or => {
+                let bool = self.ty_ctx.bool();
+                self.unify_expr_ty(lhs, bool);
+                self.unify_expr_ty(rhs, bool);
+                bool
+            }
+            InfixOp::Eqq | InfixOp::Neq => {
+                let lhs_ty = self.infer_expr(lhs);
+                self.unify_expr_ty(rhs, lhs_ty);
+                self.ty_ctx.bool()
+            }
+            InfixOp::Gt | InfixOp::Lt | InfixOp::Geq | InfixOp::Leq => {
+                let float = self.ty_ctx.float();
+                self.unify_expr_ty(lhs, float);
+                self.unify_expr_ty(rhs, float);
+                self.ty_ctx.bool()
+            }
+        }
     }
 
-    fn infer_block_expr(&mut self, hir: &Hir, module: ModuleId, block: &BlockExpr) -> PartialTy {
+    fn infer_expr_prefix(&mut self, op: PrefixOp, expr: ExprId) -> TyId {
+        match op {
+            PrefixOp::Not => {
+                let bool = self.ty_ctx.bool();
+                self.unify_expr_ty(expr, bool);
+                bool
+            }
+            PrefixOp::Neg => {
+                let float = self.ty_ctx.float();
+                self.unify_expr_ty(expr, float);
+                float
+            }
+        }
+    }
+
+    fn infer_expr_field(&mut self, base: ExprId, field_name: SpanIdent, span: Range<u32>) -> TyId {
+        let base_ty = self.infer_expr(base);
+        let field_ty = self.ty_ctx.fresh_var();
+
+        let base = self.hir.expr(base);
+
+        match self.ty_ctx.get(base_ty) {
+            Ty::Named { opaque, module, .. } if *opaque && *module != base.module => {
+                self.report(ErrorKind::OpaqueType(base_ty), base.span, base.module);
+            }
+            Ty::Named { fields, .. } if let Some(field) = fields.get(&field_name.ident) => {
+                self.unify_ty_ty(field_ty, field.ty, span, base.module);
+            }
+            Ty::Named { .. } => {
+                self.report(
+                    ErrorKind::NoSuchField(base_ty, field_name.ident),
+                    field_name.span,
+                    base.module,
+                );
+            }
+            Ty::Var(_) => {
+                self.report(ErrorKind::UninferredExprType, base.span, base.module);
+            }
+            _ => {
+                self.report(ErrorKind::NoFieldsType(base_ty), base.span, base.module);
+            }
+        }
+
+        field_ty
+    }
+
+    fn infer_exprs(&mut self, exprs: &[ExprId]) -> Vec<TyId> {
+        exprs.iter().map(|&e| self.infer_expr(e)).collect()
+    }
+
+    fn infer_block_expr(&mut self, block: &BlockExpr) -> TyId {
         let mut stmt_tys: Vec<_> = block
             .stmts
             .iter()
             .map(|stmt| match stmt {
                 Stmt::Decl { var, value, .. } => {
-                    let var_ty = self.var_ty(hir, *var).clone();
-                    let value_ty = self.infer_expr(hir, module, *value);
-                    self.constrain_eq(value_ty, var_ty, hir.expr_span(*value), module);
-                    PartialTy::unit()
+                    let var_ty = self.hir.var_info(*var).ty;
+                    self.unify_expr_ty(*value, var_ty);
+                    self.ty_ctx.unit()
                 }
-                Stmt::Expr(expr) => self.infer_expr(hir, module, *expr),
+                Stmt::Expr(expr) => self.infer_expr(*expr),
             })
             .collect();
-        stmt_tys.pop().unwrap_or_else(PartialTy::unit)
+        stmt_tys.pop().unwrap_or_else(|| self.ty_ctx.unit())
     }
 }

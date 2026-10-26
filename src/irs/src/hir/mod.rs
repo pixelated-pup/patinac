@@ -1,36 +1,35 @@
 //! The high-level intermediate representation of Patina. Produced after name resolution, and used for typechecking.
 
+pub mod ty;
+
 use std::range::Range;
 
-use foldhash::HashMap;
-use slotmap::{SecondaryMap, SlotMap, new_key_type};
+use slotmap::{SlotMap, new_key_type};
 
-use ident::{Ident, SpanIdent};
+use ident::SpanIdent;
 
-use super::ModuleId;
+use crate::ModuleId;
+use ty::TyId;
 
 /// An AST-like structure, with additional metadata in the form of type information and resolved variable identifiers.
 #[derive(Debug, Default)]
 pub struct Hir {
     main: Option<DefItem>,
-    execs: Vec<DefItem>,
-    tys: SlotMap<TyId, SpanIdent>,
-    ty_info: SecondaryMap<TyId, TyInfo>,
-    exprs: SlotMap<ExprId, (Expr, Range<u32>)>,
+    defs: Vec<DefItem>,
+
+    exprs: SlotMap<ExprId, Expr>,
     vars: SlotMap<VarId, VarInfo>,
-    var_tys: SecondaryMap<VarId, Ty>,
-    methods: SecondaryMap<TyId, HashMap<Ident, VarId>>,
 }
 
 impl Hir {
     /// Returns all of the "executable items". These are the items that contain expressions.
-    pub fn execs(&self) -> &[DefItem] {
-        &self.execs
+    pub fn defs(&self) -> &[DefItem] {
+        &self.defs
     }
 
     /// Adds an "executable item". These are the items that contain expressions.
     pub fn add_def(&mut self, exec: DefItem) {
-        self.execs.push(exec);
+        self.defs.push(exec);
     }
 
     /// Returns the main function, if it exists.
@@ -44,66 +43,32 @@ impl Hir {
     }
 }
 
-// Type-related functions
-impl Hir {
-    /// Returns an iterator over all user-defined types.
-    pub fn tys(&self) -> impl Iterator<Item = TyId> {
-        self.tys.keys()
-    }
-
-    /// Reserves a user-defined type, storing only it's name and returning a unique ID for it.
-    ///
-    /// This allows getting an ID for a type before having the full information for it.
-    /// The reservation should be fullfilled with [`fulfill_ty`][Self::fulfill_ty] as soon as possible.
-    pub fn reserve_ty(&mut self, ident: SpanIdent) -> TyId {
-        self.tys.insert(ident)
-    }
-
-    /// Fulfills a previously-reserved user-defined type, providing the rest of the information for the type.
-    ///
-    /// See [`reserve_ty`][Self::reserve_ty] for more information.
-    pub fn fulfill_ty(&mut self, id: TyId, info: TyInfo) {
-        self.ty_info.insert(id, info);
-    }
-
-    /// Adds a method to an existing type.
-    ///
-    /// # Panics
-    /// Panics if the type has not been [`fulfilled`][Self::fulfill_ty].
-    pub fn add_method(&mut self, ty: TyId, method: VarId) {
-        let method_name = self.vars[method].ident.ident;
-        self.methods[ty].insert(method_name, method);
-    }
-
-    /// Returns the name of the given type.
-    pub fn ty_ident(&self, id: TyId) -> SpanIdent {
-        self.tys[id]
-    }
-
-    /// Returns the information for the given type.
-    ///
-    /// # Panics
-    /// Panics if the type was reserved with [`reserve_ty`][Self::reserve_ty], but not yet fulfilled with [`fulfill_ty`][Self::fulfill_ty].
-    pub fn ty_info(&self, id: TyId) -> &TyInfo {
-        &self.ty_info[id]
-    }
-}
-
 // Expr-related functions
 impl Hir {
     /// Adds a spanned expression, returning a unique ID for it.
-    pub fn add_expr(&mut self, expr: Expr, span: impl Into<Range<u32>>) -> ExprId {
-        self.exprs.insert((expr, span.into()))
+    pub fn add_expr(
+        &mut self,
+        kind: ExprKind,
+        ty: TyId,
+        span: impl Into<Range<u32>>,
+        module: ModuleId,
+    ) -> ExprId {
+        self.exprs.insert(Expr {
+            kind,
+            ty,
+            span: span.into(),
+            module,
+        })
     }
 
-    /// Returns the actual expression associated with the given ID.
+    /// Returns the expression associated with the given ID.
     pub fn expr(&self, id: ExprId) -> &Expr {
-        &self.exprs[id].0
+        &self.exprs[id]
     }
 
-    /// Returns the span of the expression associated with the given ID.
-    pub fn expr_span(&self, id: ExprId) -> Range<u32> {
-        self.exprs[id].1
+    /// Returns an iterator over all the expressions.
+    pub fn exprs(&self) -> impl Iterator<Item = &Expr> {
+        self.exprs.values()
     }
 }
 
@@ -119,58 +84,10 @@ impl Hir {
         self.vars[id]
     }
 
-    /// Adds a type for the given variable.
-    pub fn add_var_ty(&mut self, id: VarId, ty: Ty) {
-        self.var_tys.insert(id, ty);
+    /// Returns an iterator over all the variables.
+    pub fn vars(&self) -> impl Iterator<Item = &VarInfo> {
+        self.vars.values()
     }
-
-    /// Returns the type for the given variable.
-    ///
-    /// # Panics
-    /// Panics if the variable has not yet been typed. Prior to typechecking, [`try_var_ty`][Self::try_var_ty] should be used instead.
-    pub fn var_ty(&self, id: VarId) -> &Ty {
-        &self.var_tys[id]
-    }
-
-    /// Returns the type for the given variable, if it has been typed yet.
-    pub fn try_var_ty(&self, id: VarId) -> Option<&Ty> {
-        self.var_tys.get(id)
-    }
-}
-
-new_key_type! {
-    /// An ID representing a user-defined type. Information about the type can be acquired through [`Hir::ty_ident`] and [`Hir::ty_info`].
-    pub struct TyId;
-}
-/// Information for a user-defined type.
-#[derive(Debug, PartialEq, Eq)]
-pub struct TyInfo {
-    /// Whether the type is opaque (meaning it's fields/variants are private).
-    pub opaque: bool,
-    /// The fields of the type.
-    pub fields: Vec<Field>,
-    /// The ID of the type's constructor function.
-    pub ctor: VarId,
-    /// The module containing the type's definition.
-    pub module: ModuleId,
-}
-
-impl TyInfo {
-    /// Returns the field with the provided name, if it exists.
-    pub fn get_field(&self, ident: Ident) -> Option<&Field> {
-        self.fields
-            .iter()
-            .find_map(|field| (field.ident.ident == ident).then_some(field))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// A field of a `record` or of a `union` variant.
-pub struct Field {
-    /// The name of the field.
-    pub ident: SpanIdent,
-    /// The type of the field.
-    pub ty: Ty,
 }
 
 /// An "executable item". These are the items that contain expressions, namely constants and functions.
@@ -209,6 +126,8 @@ pub struct VarInfo {
     pub ident: SpanIdent,
     /// Whether the variable was declared mutable.
     pub mutable: bool,
+    /// The type of the variable. May be `Var` prior to inference.
+    pub ty: TyId,
     /// Whether the variable is global (i.e. represents an [`ExecItem`]).
     pub global: bool,
     /// The module containing the variable's declaration.
@@ -219,9 +138,23 @@ new_key_type! {
     /// An ID corresponding to an [`Expr`].
     pub struct ExprId;
 }
-/// An expression.
+
+/// An expression, with type and span information.
 #[derive(Debug, PartialEq)]
-pub enum Expr {
+pub struct Expr {
+    /// The underlying kind of expression.
+    pub kind: ExprKind,
+    /// The type of the expression.
+    pub ty: TyId,
+    /// The source span of the expression.
+    pub span: Range<u32>,
+    /// The module containing the expression.
+    pub module: ModuleId,
+}
+
+/// The kinds of expressions.
+#[derive(Debug, PartialEq)]
+pub enum ExprKind {
     /// A reference to a named value.
     Var(VarId),
     /// A scalar literal value. The specific kinds of literals are represented by [`LitExpr`].
@@ -415,45 +348,4 @@ pub enum PrefixOp {
     Not,
     /// `-`. Numeric negation.
     Neg,
-}
-
-/// The kinds of types.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Ty {
-    /// 64-bit signed integer.
-    Int,
-    /// 64-bit unsigned integer.
-    UInt,
-    /// 8-bit unsigned integer.
-    Byte,
-    /// Double-precision floating point number (binary64).
-    Float,
-    /// Truth value (`true`/`false`).
-    Bool,
-    /// A heterogenous tuple (compile-time length).
-    Tuple(Vec<Self>),
-    /// A first-class function value, implemented as a closure.
-    Func(Vec<Param>, Box<Self>),
-    /// A user-defined type, such as a `record` or `union`.
-    Named(TyId),
-}
-
-impl Ty {
-    /// Constructs an empty [`Ty::Tuple`] for representing the Unit type.
-    pub const fn unit() -> Self {
-        Self::Tuple(vec![])
-    }
-}
-
-/// A parameter of a function type.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Param {
-    /// The type of the paremeter.
-    pub ty: Ty,
-    /// Whether the parameter is mutable.
-    pub mutable: bool,
-    /// The total span of the parameter.
-    /// If `mutable` is false, this should be identical to the span of `ty`.
-    /// Otherwise, it should include the span of the `mut` keyword.
-    pub span: Range<u32>,
 }

@@ -28,8 +28,11 @@ impl Error for HandledError {}
 
 /// A trait for user-reportable diagnostics, including errors and warnings.
 pub trait Diagnostic {
+    /// Any context needed to construct the report.
+    type Ctx<'a>;
+
     /// Constructs a report from this diagnostic.
-    fn report(self) -> Report;
+    fn report(self, ctx: Self::Ctx<'_>) -> Report;
 }
 
 /// A textual report generated from a diagnostic.
@@ -83,7 +86,9 @@ impl Report {
 }
 
 impl Diagnostic for Report {
-    fn report(self) -> Report {
+    type Ctx<'a> = ();
+
+    fn report(self, (): ()) -> Report {
         self
     }
 }
@@ -121,18 +126,32 @@ impl<'callback> ErrorHandler<'callback> {
     }
 
     /// Reports the provided diagnostic and produces a [`HandledError`] for the caller to use.
-    pub fn report(
+    pub fn report_ctx<D: Diagnostic>(
         &self,
-        diagnostic: impl Diagnostic,
+        diagnostic: D,
+        ctx: D::Ctx<'_>,
         span: impl Into<Range<u32>>,
         module: ModuleId,
     ) -> HandledError {
-        let report = diagnostic.report();
+        let report = diagnostic.report(ctx);
         if report.kind == ReportKind::Error {
             self.has_err.set(true);
         }
         (self.f)(report, span.into(), module);
         HandledError
+    }
+
+    /// Reports the provided diagnostic and produces a [`HandledError`] for the caller to use.
+    pub fn report<D>(
+        &self,
+        diagnostic: D,
+        span: impl Into<Range<u32>>,
+        module: ModuleId,
+    ) -> HandledError
+    where
+        D: for<'a> Diagnostic<Ctx<'a> = ()>,
+    {
+        self.report_ctx(diagnostic, (), span, module)
     }
 
     /// Returns the provided value wrapped in [`Ok`], or a [`HandledError`] if this handler has reported any errors.

@@ -13,7 +13,7 @@ impl ResolveInfo<'_, '_> {
     pub fn resolve_expr(&mut self, expr: &ast::Expr) -> Result<ExprId> {
         let new_expr = match &expr.kind {
             ExprKind::Var(path) => match self.scopes.resolve_var(path.as_slice()) {
-                Ok(id) => hir::Expr::Var(id),
+                Ok(id) => hir::ExprKind::Var(id),
                 Err(e) => return Err(self.err(e, expr.span)),
             },
             ExprKind::Lit(lit) => {
@@ -23,28 +23,28 @@ impl ResolveInfo<'_, '_> {
                     ast::LitExpr::String(s) => hir::LitExpr::String(s.clone()),
                     ast::LitExpr::Bool(b) => hir::LitExpr::Bool(*b),
                 };
-                hir::Expr::Lit(lit)
+                hir::ExprKind::Lit(lit)
             }
-            ExprKind::Tuple(exprs) => hir::Expr::Tuple(self.resolve_exprs(exprs)?),
+            ExprKind::Tuple(exprs) => hir::ExprKind::Tuple(self.resolve_exprs(exprs)?),
             ExprKind::Infix { op, lhs, rhs } => {
                 let rhs = self.resolve_expr(rhs);
                 let lhs = self.resolve_expr(lhs)?;
                 match convert_infix_op(*op) {
-                    Some(op) => hir::Expr::Infix { op, lhs, rhs: rhs? },
+                    Some(op) => hir::ExprKind::Infix { op, lhs, rhs: rhs? },
                     None => {
                         self.assert_is_place(lhs);
-                        hir::Expr::Assign {
+                        hir::ExprKind::Assign {
                             place: lhs,
                             value: rhs?,
                         }
                     }
                 }
             }
-            ExprKind::Prefix { op, expr } => hir::Expr::Prefix {
+            ExprKind::Prefix { op, expr } => hir::ExprKind::Prefix {
                 op: convert_prefix_op(*op),
                 expr: self.resolve_expr(expr)?,
             },
-            ExprKind::Field { base, field } => hir::Expr::Field {
+            ExprKind::Field { base, field } => hir::ExprKind::Field {
                 base: self.resolve_expr(base)?,
                 field: *field,
             },
@@ -79,7 +79,7 @@ impl ResolveInfo<'_, '_> {
                         }
                     })?;
 
-                hir::Expr::Call { func: func?, args }
+                hir::ExprKind::Call { func: func?, args }
             }
             ExprKind::MethodCall { base, method, args } => {
                 let base = self.resolve_expr(base);
@@ -112,7 +112,7 @@ impl ResolveInfo<'_, '_> {
                         }
                     })?;
 
-                hir::Expr::MethodCall {
+                hir::ExprKind::MethodCall {
                     base: base?,
                     method: *method,
                     args,
@@ -145,7 +145,7 @@ impl ResolveInfo<'_, '_> {
 
                 self.scopes.pop_scope();
 
-                hir::Expr::Lambda {
+                hir::ExprKind::Lambda {
                     params: params?,
                     body: body?,
                     captures,
@@ -158,7 +158,7 @@ impl ResolveInfo<'_, '_> {
                     .as_ref()
                     .map(|el| self.resolve_block_expr(el))
                     .transpose();
-                hir::Expr::If {
+                hir::ExprKind::If {
                     cond: cond?,
                     th: th?,
                     el: el?,
@@ -173,18 +173,18 @@ impl ResolveInfo<'_, '_> {
                 let body = self.resolve_block_expr(body);
                 self.scopes.pop_scope();
 
-                hir::Expr::For {
+                hir::ExprKind::For {
                     id,
                     iter: iter?,
                     body: body?,
                 }
             }
-            ExprKind::Loop(body) => hir::Expr::Loop(self.resolve_block_expr(body)?),
-            ExprKind::Break => hir::Expr::Break,
-            ExprKind::Continue => hir::Expr::Continue,
-            ExprKind::Return(expr) => hir::Expr::Return(self.resolve_expr(expr)?),
-            ExprKind::Block(stmts) => hir::Expr::Block(self.resolve_block_expr(stmts)?),
-            ExprKind::Print(expr) => hir::Expr::Print(self.resolve_expr(expr)?),
+            ExprKind::Loop(body) => hir::ExprKind::Loop(self.resolve_block_expr(body)?),
+            ExprKind::Break => hir::ExprKind::Break,
+            ExprKind::Continue => hir::ExprKind::Continue,
+            ExprKind::Return(expr) => hir::ExprKind::Return(self.resolve_expr(expr)?),
+            ExprKind::Block(stmts) => hir::ExprKind::Block(self.resolve_block_expr(stmts)?),
+            ExprKind::Print(expr) => hir::ExprKind::Print(self.resolve_expr(expr)?),
         };
 
         Ok(self.hir.add_expr(new_expr, expr.span))
@@ -228,34 +228,32 @@ impl ResolveInfo<'_, '_> {
         })
     }
 
-    fn assert_is_place(&mut self, place: ExprId) {
-        match self.hir.expr(place) {
-            hir::Expr::Var(id) => {
+    fn assert_is_place(&mut self, expr: ExprId) {
+        let expr = self.hir.expr(expr);
+        match &expr.kind {
+            hir::ExprKind::Var(id) => {
                 let info = self.hir.var_info(*id);
                 if !info.mutable {
-                    self.err(
-                        ErrorKind::Mutation(info.ident.ident),
-                        self.hir.expr_span(place),
-                    );
+                    self.err(ErrorKind::Mutation(info.ident.ident), expr.span);
                 }
             }
-            hir::Expr::Field { base, .. } => self.assert_is_place(*base),
+            hir::ExprKind::Field { base, .. } => self.assert_is_place(*base),
             _ => {
-                self.err(ErrorKind::NotPlaceExpr, self.hir.expr_span(place));
+                self.err(ErrorKind::NotPlaceExpr, expr.span);
             }
         }
     }
 
     fn overlaps(&self, a: ExprId, b: ExprId) -> bool {
-        match (self.hir.expr(a), self.hir.expr(b)) {
-            (hir::Expr::Var(a), hir::Expr::Var(b)) => a == b,
-            (hir::Expr::Var(_), hir::Expr::Field { base, .. }) => self.overlaps(a, *base),
+        match (&self.hir.expr(a).kind, &self.hir.expr(b).kind) {
+            (hir::ExprKind::Var(a), hir::ExprKind::Var(b)) => a == b,
+            (hir::ExprKind::Var(_), hir::ExprKind::Field { base, .. }) => self.overlaps(a, *base),
             (
-                hir::Expr::Field {
+                hir::ExprKind::Field {
                     base: base_a,
                     field: field_a,
                 },
-                hir::Expr::Field {
+                hir::ExprKind::Field {
                     base: base_b,
                     field: field_b,
                 },

@@ -7,12 +7,12 @@ edition = "2024"
 # Internal
 ident.path = "../ident"
 # External
-derive_more = { version = "2.1.1", features = [
-    "display",
-    "from",
-] }
+ena = "0.14.3"
+derive_more = { version = "2.1.1", features = ["display", "from"] }
 foldhash = "0.2.0"
 slotmap = "1.1.1"
+ordermap = "1.2.2"
+itertools = "0.15.0"
 
 [lints]
 workspace = true

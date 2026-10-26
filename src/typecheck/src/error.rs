@@ -1,35 +1,33 @@
 use errors::{Diagnostic, Report};
 use ident::Ident;
-
-use crate::types::PartialTy;
+use irs::hir::ty::{TyContext, TyId};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ErrorKind {
-    TypeMismatch {
-        expected: PartialTy,
-        found: PartialTy,
-    },
-    MutMismatch {
-        should_be_mut: bool,
-    },
-    ArgCount {
-        expected: usize,
-        found: usize,
-    },
+    TypeMismatch { expected: TyId, found: TyId },
+    MutMismatch { should_be_mut: bool },
+    ArgCount { expected: usize, found: usize },
     Infinite,
     UninferredExprType,
     UninferredVarType,
-    NoSuchField(Ident, Ident),
-    NoSuchMethod(PartialTy, Ident),
-    NoFieldsType(PartialTy),
-    OpaqueType(Ident),
+    NoSuchField(TyId, Ident),
+    NoSuchMethod(TyId, Ident),
+    NoFieldsType(TyId),
+    OpaqueType(TyId),
 }
 
 impl Diagnostic for ErrorKind {
-    fn report(self) -> Report {
+    type Ctx<'a> = &'a TyContext;
+
+    fn report(self, ty_ctx: &TyContext) -> Report {
         match self {
-            Self::TypeMismatch { expected, found } => Report::error("mismatched types")
-                .with_label(format!("expected type {expected}, found type {found}")),
+            Self::TypeMismatch { expected, found } => {
+                Report::error("mismatched types").with_label(format!(
+                    "expected type {}, found type {}",
+                    expected.display(ty_ctx),
+                    found.display(ty_ctx)
+                ))
+            }
             Self::MutMismatch { should_be_mut } => {
                 let report = Report::error("incorrect argument mutability");
                 if should_be_mut {
@@ -51,14 +49,20 @@ impl Diagnostic for ErrorKind {
                 .with_label("could not infer a concrete type for this expression"),
             Self::UninferredVarType => Report::error("uninferred type")
                 .with_label("could not infer a concrete type for this variable"),
-            Self::NoSuchField(ty, field) => Report::error("field not found")
-                .with_label(format!("type {ty} does not have a field named {field}")),
-            Self::NoSuchMethod(ty, method) => Report::error("method not found")
-                .with_label(format!("type {ty} does not have a method named {method}")),
+            Self::NoSuchField(ty, field) => Report::error("field not found").with_label(format!(
+                "type {} does not have a field named {field}",
+                ty.display(ty_ctx)
+            )),
+            Self::NoSuchMethod(ty, method) => {
+                Report::error("method not found").with_label(format!(
+                    "type {} does not have a method named {method}",
+                    ty.display(ty_ctx)
+                ))
+            }
             Self::NoFieldsType(ty) => Report::error("field access on type with no fields")
-                .with_label(format!("type {ty} does not have fields")),
-            Self::OpaqueType(ident) => Report::error("field not accessible")
-                .with_label(format!("type `{ident}` is opaque")),
+                .with_label(format!("type {} does not have fields", ty.display(ty_ctx))),
+            Self::OpaqueType(ty) => Report::error("field not accessible")
+                .with_label(format!("type `{}` is opaque", ty.display(ty_ctx))),
         }
     }
 }

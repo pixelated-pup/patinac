@@ -14,7 +14,7 @@ use errors::ErrorHandler;
 use ident::Ident;
 use irs::{
     ModuleId,
-    hir::{self, DefItem, DefKind, Hir, TyId},
+    hir::{self, DefItem, DefKind, Hir, ty::TyId},
     mir::{self, Item, ItemKind, Mir, VarInfo},
 };
 

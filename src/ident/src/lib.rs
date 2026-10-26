@@ -12,7 +12,7 @@ use string_interner::{DefaultStringInterner as Interner, symbol::SymbolU32};
 
 fn interner() -> MutexGuard<'static, Interner> {
     static INTERNER: LazyLock<Mutex<Interner>> = LazyLock::new(Mutex::default);
-    INTERNER.lock().expect("Interner Poisoned!")
+    INTERNER.try_lock().expect("Interner Locked!")
 }
 
 fn get_str(interner: &Interner, ident: Ident) -> &str {

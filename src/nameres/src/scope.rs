@@ -13,7 +13,7 @@ use crate::error::{ErrorKind, ItemKind};
 pub struct ScopeInfo<'pkg> {
     package: &'pkg Package,
     module: ModuleId,
-    local_stack: Vec<HashMap<Ident, VarId>>,
+    locals: Vec<HashMap<Ident, VarId>>,
     modules: SecondaryMap<ModuleId, ModuleScope>,
     assocs: HashMap<(Ty, Ident), (Visibility, VarId)>,
 }
@@ -25,18 +25,18 @@ impl<'pkg> ScopeInfo<'pkg> {
         Self {
             package,
             module: package.root(),
-            local_stack: Vec::new(),
+            locals: Vec::new(),
             modules,
             assocs: HashMap::new(),
         }
     }
 
     pub fn push_scope(&mut self) {
-        self.local_stack.push(HashMap::new());
+        self.locals.push(HashMap::new());
     }
 
     pub fn pop_scope(&mut self) {
-        self.local_stack.pop();
+        self.locals.pop();
     }
 
     pub const fn module(&self) -> ModuleId {
@@ -89,7 +89,7 @@ impl<'pkg> ScopeInfo<'pkg> {
     }
 
     pub fn add_var(&mut self, ident: Ident, id: VarId) -> Option<VarId> {
-        self.local_stack
+        self.locals
             .last_mut()
             .expect("Tried to add local variable with no local scope on stack")
             .insert(ident, id)
@@ -133,7 +133,7 @@ impl<'pkg> ScopeInfo<'pkg> {
                 }
             }
             (None, tail) => self
-                .local_stack
+                .locals
                 .iter()
                 .rev()
                 .find_map(|scope| scope.get(&tail).copied())

@@ -13,7 +13,7 @@ use errors::{ErrorHandler, HandledError, Result, TryCollectEager as _};
 use irs::{
     ModuleId, Package,
     ast::{self, Ast, Binding, Import, Pat, PatKind, TyItem, TyItemKind, TyKind},
-    hir::{self, Field, Hir, Param, TyId, TyInfo, VarId, VarInfo},
+    hir::{self, Field, Hir, Param, TyId, VarId, VarInfo},
 };
 
 use crate::{
@@ -50,6 +50,90 @@ pub fn resolve(
 }
 
 impl ResolveInfo<'_, '_> {
+    fn populate_scope(&mut self, module: ModuleID, is_root: bool) {
+        for &child in &self.package.get(module).children {
+            self.resolve_module(child, false);
+        }
+
+        self.scopes.set_module(module);
+
+        let ast = &self.asts[module];
+
+        let mut ty_ids = Vec::new();
+        for ty in &ast.ty_items {
+            let id = self.hir.fresh_var();
+            let vis = if ty.public {
+                Visibility::Public
+            } else {
+                Visibility::Private
+            };
+            if self.scopes.add_ty(vis, ty.ident.ident, id).is_some() {
+                self.err(
+                    ErrorKind::DuplicateItem(ItemKind::Type, ty.ident.ident),
+                    ty.ident.span,
+                );
+            }
+            ty_ids.push((ty, id));
+        }
+
+        let mut def_ids = Vec::new();
+        for impl_ in &ast.impls {
+            for def in &impl_.defs {
+                let Ok(ty) = self.resolve_ty(&impl_.ty) else {
+                    continue;
+                };
+                let id = self.hir.add_var(VarInfo {
+                    ident: def.ident,
+                    mutable: false,
+                    global: true,
+                    module: self.scopes.module(),
+                });
+                let vis = if def.public {
+                    Visibility::Public
+                } else {
+                    Visibility::Private
+                };
+                if self
+                    .scopes
+                    .add_assoc_def(ty, vis, def.ident.ident, id)
+                    .is_some()
+                {
+                    self.err(
+                        ErrorKind::DuplicateItem(ItemKind::Value, def.ident.ident),
+                        def.ident.span,
+                    );
+                }
+                def_ids.push((def, id));
+            }
+        }
+        for def in &ast.defs {
+            let id = self.hir.add_var(VarInfo {
+                ident: def.ident,
+                mutable: false,
+                global: true,
+                module: self.scopes.module(),
+            });
+            let vis = if def.public {
+                Visibility::Public
+            } else {
+                Visibility::Private
+            };
+            if self.scopes.add_def(vis, def.ident.ident, id).is_some() {
+                self.err(
+                    ErrorKind::DuplicateItem(ItemKind::Value, def.ident.ident),
+                    def.ident.span,
+                );
+            }
+            def_ids.push((def, id));
+        }
+
+        for Import(path, span) in &ast.imports {
+            if let Err(e) = self.scopes.import(path.as_slice()) {
+                self.err(e, *span);
+            }
+        }
+    }
+
     fn resolve_module(&mut self, module: ModuleId, is_root: bool) {
         for &child in &self.package.get(module).children {
             self.resolve_module(child, false);
@@ -61,7 +145,7 @@ impl ResolveInfo<'_, '_> {
 
         let mut ty_ids = Vec::new();
         for ty in &ast.ty_items {
-            let id = self.hir.reserve_ty(ty.ident);
+            let id = self.hir.fresh_var();
             let vis = if ty.public {
                 Visibility::Public
             } else {
@@ -290,13 +374,12 @@ impl ResolveInfo<'_, '_> {
                     .into_iter()
                     .chain(params.iter().map(|p| {
                         let ty = self.resolve_ty(&p.ty)?;
-                        let id = self.resolve_pat(&p.pat, p.mutable, Some(ty.clone()));
+                        let id = self.resolve_pat(&p.pat, p.mutable, ty);
                         Ok((
                             id,
                             Param {
                                 ty,
                                 mutable: p.mutable,
-                                span: p.span,
                             },
                         ))
                     }))
@@ -325,17 +408,19 @@ impl ResolveInfo<'_, '_> {
     }
 
     fn resolve_binding(&mut self, binding: &Binding) -> Result<VarId> {
-        let ty = binding
-            .ty
-            .as_ref()
-            .map(|ty| self.resolve_ty(ty))
-            .transpose()?;
+        let ty = match binding.ty.as_ref() {
+            None => self.hir.fresh_var(),
+            Some(ty) => self.resolve_ty(ty)?,
+        };
         Ok(self.resolve_pat(&binding.pat, binding.mutable, ty))
     }
 
-    fn resolve_ty(&mut self, ty: &ast::Ty) -> Result<hir::Ty> {
+    fn resolve_ty(&mut self, ty: &ast::Ty) -> Result<hir::TyId> {
         match &ty.kind {
-            TyKind::Tuple(tys) => Ok(hir::Ty::Tuple(self.resolve_tys(tys)?)),
+            TyKind::Tuple(tys) => {
+                let ty = hir::Ty::Tuple(self.resolve_tys(tys)?);
+                Ok(self.hir.intern_ty(ty))
+            }
             TyKind::Func(params, ret_ty) => {
                 let params = params
                     .iter()
@@ -343,51 +428,51 @@ impl ResolveInfo<'_, '_> {
                         Ok(Param {
                             ty: self.resolve_ty(&param.ty)?,
                             mutable: param.mutable,
-                            span: param.span,
                         })
                     })
                     .try_collect_eager();
-                let ret_ty = Box::new(self.resolve_ty(ret_ty)?);
-                Ok(hir::Ty::Func(params?, ret_ty))
+                let ret_ty = self.resolve_ty(ret_ty)?;
+                Ok(self.hir.intern_ty(hir::Ty::Func(params?, ret_ty)))
             }
             TyKind::Named(path, args) => {
                 if !args.is_empty() {
                     todo!("Generics")
                 }
 
-                match &*path.last().str() {
-                    "Int" => return Ok(hir::Ty::Int),
-                    "UInt" => return Ok(hir::Ty::UInt),
-                    "Byte" => return Ok(hir::Ty::Byte),
-                    "Bool" => return Ok(hir::Ty::Bool),
-                    "Float" => return Ok(hir::Ty::Float),
-                    _ => (),
-                }
+                let prim_ty = match &*path.last().str() {
+                    "Int" => Some(hir::Ty::Int),
+                    "UInt" => Some(hir::Ty::UInt),
+                    "Byte" => Some(hir::Ty::Byte),
+                    "Bool" => Some(hir::Ty::Bool),
+                    "Float" => Some(hir::Ty::Float),
+                    _ => None,
+                };
 
-                match self.scopes.resolve_ty(path.as_slice()) {
-                    Ok(id) => Ok(hir::Ty::Named(id)),
-                    Err(e) => Err(self.err(e, ty.span)),
+                match prim_ty {
+                    Some(ty) => Ok(self.hir.intern_ty(ty)),
+                    None => self
+                        .scopes
+                        .resolve_ty(path.as_slice())
+                        .map_err(|e| self.err(e, ty.span)),
                 }
             }
         }
     }
 
-    fn resolve_tys(&mut self, tys: &[ast::Ty]) -> Result<Vec<hir::Ty>> {
+    fn resolve_tys(&mut self, tys: &[ast::Ty]) -> Result<Vec<hir::TyId>> {
         tys.iter().map(|ty| self.resolve_ty(ty)).try_collect_eager()
     }
 
-    fn resolve_pat(&mut self, pat: &Pat, mutable: bool, ty: Option<hir::Ty>) -> VarId {
+    fn resolve_pat(&mut self, pat: &Pat, mutable: bool, ty: hir::TyId) -> VarId {
         match pat.kind {
             PatKind::Ident(ident) => {
                 let id = self.hir.add_var(VarInfo {
                     ident: ident.span(pat.span),
                     mutable,
+                    ty,
                     global: false,
                     module: self.scopes.module(),
                 });
-                if let Some(ty) = ty {
-                    self.hir.add_var_ty(id, ty);
-                }
                 self.scopes.add_var(ident, id);
                 id
             }

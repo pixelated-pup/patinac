@@ -108,8 +108,8 @@ impl Display for Path {
 
 /// A borrowed slice of a [`Path`]. Guaranteed to always have at least one segment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct PathSlice<'a> {
-    head: &'a [Ident],
+pub struct PathSlice<'path> {
+    head: &'path [Ident],
     tail: Ident,
 }
 

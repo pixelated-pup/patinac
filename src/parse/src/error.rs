@@ -16,7 +16,9 @@ pub enum ErrorKind {
 }
 
 impl Diagnostic for ErrorKind {
-    fn report(self) -> Report {
+    type Ctx<'a> = ();
+
+    fn report(self, (): ()) -> Report {
         match self {
             Self::BadToken => Report::error("invalid token"),
             Self::Unexpected(found, msg) => {
