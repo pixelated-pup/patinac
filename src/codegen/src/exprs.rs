@@ -3,7 +3,7 @@ use inkwell::{
     values::{BasicMetadataValueEnum, BasicValue as _, BasicValueEnum, PointerValue},
 };
 
-use irs::mir::{Arg, BlockExpr, Expr, ExprId, InfixOp, LitExpr, PrefixOp, Stmt, Ty, VarId};
+use irs::mir::{Arg, BlockExpr, Expr, ExprId, InfixOp, LitValue, PrefixOp, Stmt, Ty, VarId};
 
 use crate::{
     CodegenState,
@@ -99,13 +99,13 @@ impl<'mir, 'ctx> CodegenState<'mir, 'ctx> {
         self.build_dup(self.vars[id])
     }
 
-    fn emit_lit(&self, lit: &LitExpr) -> LayoutValue<'mir, 'ctx> {
+    fn emit_lit(&self, lit: &LitValue) -> LayoutValue<'mir, 'ctx> {
         match lit {
-            LitExpr::Int(value) => LayoutValue::int(IntSize::Bits64, self.const_int(*value)),
-            LitExpr::UInt(value) => LayoutValue::int(IntSize::Bits64, self.const_uint(*value)),
-            LitExpr::Byte(value) => LayoutValue::int(IntSize::Bits8, self.const_byte(*value)),
-            LitExpr::Float(value) => LayoutValue::float(self.const_float(*value)),
-            LitExpr::Bool(value) => LayoutValue::int(IntSize::Bits8, self.const_bool(*value)),
+            LitValue::Int(value) => LayoutValue::int(IntSize::Bits64, self.const_int(*value)),
+            LitValue::UInt(value) => LayoutValue::int(IntSize::Bits64, self.const_uint(*value)),
+            LitValue::Byte(value) => LayoutValue::int(IntSize::Bits8, self.const_byte(*value)),
+            LitValue::Float(value) => LayoutValue::float(self.const_float(*value)),
+            LitValue::Bool(value) => LayoutValue::int(IntSize::Bits8, self.const_bool(*value)),
         }
     }
 

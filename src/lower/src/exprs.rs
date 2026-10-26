@@ -101,7 +101,7 @@ impl LowerInfo<'_, '_> {
         self.mir.add_expr(new_expr)
     }
 
-    fn lower_lit(&self, expr: hir::ExprId, lit: &hir::LitExpr) -> mir::LitExpr {
+    fn lower_lit(&self, expr: hir::ExprId, lit: &hir::LitExpr) -> mir::LitValue {
         match lit {
             &hir::LitExpr::Int(value) => match self.expr_ty(expr) {
                 hir::Ty::Int => {
@@ -116,9 +116,9 @@ impl LowerInfo<'_, '_> {
                         );
                         i64::MAX
                     });
-                    mir::LitExpr::Int(i)
+                    mir::LitValue::Int(i)
                 }
-                hir::Ty::UInt => mir::LitExpr::UInt(value),
+                hir::Ty::UInt => mir::LitValue::UInt(value),
                 hir::Ty::Byte => {
                     let b = u8::try_from(value).unwrap_or_else(|_| {
                         self.handler.report(
@@ -131,13 +131,13 @@ impl LowerInfo<'_, '_> {
                         );
                         u8::MAX
                     });
-                    mir::LitExpr::Byte(b)
+                    mir::LitValue::Byte(b)
                 }
                 _ => unreachable!("not an int type"),
             },
-            &hir::LitExpr::Float(value) => mir::LitExpr::Float(value),
+            &hir::LitExpr::Float(value) => mir::LitValue::Float(value),
             hir::LitExpr::String(_) => todo!("Strings"),
-            &hir::LitExpr::Bool(value) => mir::LitExpr::Bool(value),
+            &hir::LitExpr::Bool(value) => mir::LitValue::Bool(value),
         }
     }
 

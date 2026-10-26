@@ -6,10 +6,15 @@ use ident::Ident;
 
 /// The mid-level intermediate representation of Patina.
 ///
+/// - Expressions have been flattened into something between ANF and SSA
+/// - Control flow has been lowered to gotos
 /// - Lambdas have been lowered to closures
 /// - Records have been erased and are equivalent to tuples
 /// - Location information has been stripped
 /// - Type information has been trimmed down to what is necessary
+/// Eventually:
+/// - Generics will have been monomorphised
+/// - Pattern matching will have been lowered to switching on integers
 #[derive(Debug, Default)]
 pub struct Mir {
     main: Option<Item>,
@@ -88,7 +93,7 @@ pub enum ItemKind {
     Const(ExprId),
     /// A function item.
     Func {
-        /// The value parameters.
+        /// The function's parameters.
         params: Vec<VarId>,
         /// The body.
         body: ExprId,
@@ -110,66 +115,72 @@ pub struct VarInfo {
     pub ty: Ty,
 }
 
+/// A statement.
+#[derive(Debug)]
+pub enum Stmt {
+    /// Assignment to a place.
+    Assign {
+        /// The place being assigned to.
+        place: Place,
+        /// The value being assigned.
+        value: Value,
+    },
+    /// An expression used as a statement, evaluated purely for side-effects.
+    Expr(ExprId),
+    /// A function call.
+    Call {
+        /// The function being called.
+        func: Value,
+        /// The list of arguments being applied.
+        args: Vec<Arg>,
+        /// Where the result of the function call will be stored.
+        dst: Place,
+    },
+}
+
+/// An argument in a [function call][Stmt::Call]. Either a [`Value`] or a [`Place`].
+#[derive(Debug)]
+pub enum Arg {
+    Value(Value),
+    Place(Place),
+}
+
 new_key_type! {
     /// An ID corresponding to an [`Expr`].
     pub struct ExprId;
 }
 /// An expression.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Expr {
-    /// A reference to a named value.
-    Var(VarId),
-    /// A scalar literal value. The specific kinds of literals are represented by [`LitExpr`].
-    Lit(LitExpr),
+    /// A value used unchanged as an expression.
+    Val(Value),
     /// A literal for a heterogenous aggreggate value (tuple or record).
     ///
     /// The two vecs should be the same lengths, forming field type - field value pairs.
-    Construct(Vec<Ty>, Vec<ExprId>),
+    Construct(Vec<Ty>, Vec<Value>),
     /// An infix operation.
     Infix {
         /// The infix operator used.
         op: InfixOp,
         /// The left-hand side of the operation.
-        lhs: ExprId,
+        lhs: Value,
         /// The right-hand side of the operation.
-        rhs: ExprId,
+        rhs: Value,
     },
     /// A prefix operation.
     Prefix {
         /// The prefix operator used.
         op: PrefixOp,
-        /// The base expression the operator is applied to.
-        expr: ExprId,
+        /// The value the operator is applied to.
+        expr: Value,
     },
-    /// Field access.
-    Field {
-        /// The base expression from which the field is being accessed.
-        base: ExprId,
-        /// The index of the field being accessed.
-        field: u32,
-    },
-    /// A function call.
-    Call {
-        /// The function being called.
-        func: ExprId,
-        /// The list of arguments being applied.
-        args: Vec<Arg>,
-        /// The return type of the function being called.
-        ret_ty: Ty,
-    },
+
     /// A closure.
     Closure {
         /// The lifted function representing the closure body.
         func: VarId,
         /// The captured variables.
         captures: Vec<VarId>,
-    },
-    /// A variable assignment.
-    Assign {
-        /// The place being assigned to, on the left of the `=`. Semantically, this must be a "place expression".
-        place: ExprId,
-        /// The value being assigned, on the right of the `=`.
-        value: ExprId,
     },
     /// An if-then, with an optional else branch.
     If {
@@ -193,10 +204,36 @@ pub enum Expr {
     Print(Ty, ExprId),
 }
 
-/// The kinds of [literal expressions][Expr::Lit].
+#[derive(Debug)]
+pub enum Value {
+    /// A copy from a place. This is the default way of reading from a place.
+    Copy(Place),
+    /// A move out of a place.
+    /// This does not run any copy code (such as incrementing a refcount),
+    /// and is used as an optimisation when the source place is never used again.
+    Move(Place),
+    /// A scalar literal value. The specific kinds of literals are represented by [`LitValue`].
+    Lit(LitValue),
+}
+
+#[derive(Debug)]
+pub struct Place {
+    base: VarId,
+    /// A list of field accesses applied to the base place.
+    /// If this is empty, the place is a local variable.
+    accesses: Vec<FieldAccess>,
+}
+
+#[derive(Debug)]
+pub struct FieldAccess {
+    idx: u32,
+    ty: Ty,
+}
+
+/// The kinds of [literal values][Value::Lit].
 #[derive(Debug, Clone, PartialEq)]
-pub enum LitExpr {
-    /// A signed 64-bit integer. Sign is not part of the literal.
+pub enum LitValue {
+    /// A signed 64-bit integer.
     Int(i64),
     /// An unsigned 64-bit interger.
     UInt(u64),
@@ -208,34 +245,9 @@ pub enum LitExpr {
     Bool(bool),
 }
 
-/// An argument in a [ function call][Expr::Call], consisting of an expression that may have a mutability annotation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Arg {
-    /// The type of the function argument.
-    pub ty: Ty,
-    /// The value of the function argument.
-    pub value: ExprId,
-    /// Whether this argument is mutable. If it is, the value must be a place expression.
-    pub mutable: bool,
-}
-
 /// A block of statements.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct BlockExpr(pub Vec<Stmt>);
-
-/// A statement. Always contained within a [`BlockExpr`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stmt {
-    /// A variable declaration.
-    Decl {
-        /// The the variable being bound.
-        var: VarId,
-        /// The initial value for the variable.
-        value: ExprId,
-    },
-    /// An expression used as a statement, evaluated purely for side-effects.
-    Expr(ExprId),
-}
 
 /// An infix operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
