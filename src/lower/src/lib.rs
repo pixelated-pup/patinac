@@ -14,49 +14,52 @@ use errors::ErrorHandler;
 use ident::Ident;
 use irs::{
     ModuleId,
-    hir::{self, DefItem, DefKind, Hir, ty::TyId},
-    mir::{self, Item, ItemKind, Mir, VarInfo},
+    hir::{
+        self, DefItem, DefKind, ExprId, Hir,
+        ty::{Ty as HirTy, TyContext, TyId as HirTyId},
+    },
+    mir::{self, BlockId, Item, ItemId, Mir, VarInfo},
 };
 
-struct LowerInfo<'hir, 'err> {
+struct LowerInfo<'hir, 'ty_ctx, 'err> {
     hir: &'hir Hir,
-    expr_tys: &'hir SecondaryMap<hir::ExprId, hir::Ty>,
+    ty_ctx: &'ty_ctx TyContext,
     handler: ErrorHandler<'err>,
     mir: Mir,
     var_map: SecondaryMap<hir::VarId, mir::VarId>,
     module: ModuleId,
     lambda_counter: u32,
+    func: ItemId,
+    block: BlockId,
 }
 
 /// Resolves and lowers the provided [`Package`] into a single [`Hir`].
 ///
 /// # Errors
 /// Returns an error if there are any unbound variables, undefined types, or multiple items with the same name.
-pub fn lower(
-    handler: ErrorHandler,
-    hir: &Hir,
-    expr_tys: &SecondaryMap<hir::ExprId, hir::Ty>,
-) -> Mir {
+pub fn lower(hir: &Hir, ty_ctx: &TyContext, handler: ErrorHandler<'_>) -> Mir {
     LowerInfo {
         hir,
-        expr_tys,
+        ty_ctx,
         handler,
         mir: Mir::default(),
         var_map: SecondaryMap::new(),
-        module: ModuleId::null(),
+        module: ModuleId::default(),
         lambda_counter: 0,
+        func: ItemId::default(),
+        block: BlockId::default(),
     }
     .lower()
 }
 
-impl<'hir> LowerInfo<'hir, '_> {
+impl<'hir> LowerInfo<'hir, '_, '_> {
     fn lower(mut self) -> Mir {
         // Build constructors, populating the field map along the way.
         for id in self.hir.tys() {
             self.lower_ctor(id);
         }
 
-        for item in self.hir.execs() {
+        for item in self.hir.defs() {
             let item = self.lower_item(item);
             self.mir.add_item(item);
         }
@@ -67,6 +70,14 @@ impl<'hir> LowerInfo<'hir, '_> {
         }
 
         self.mir
+    }
+
+    fn lower_func(
+        &mut self,
+        var: hir::VarId,
+        params: Vec<hir::VarId>,
+        body: ExprId,
+    ) -> mir::ItemId {
     }
 
     fn lower_var(&mut self, var: hir::VarId) -> mir::VarId {
@@ -126,11 +137,7 @@ impl<'hir> LowerInfo<'hir, '_> {
         }
     }
 
-    fn expr_ty(&self, expr: hir::ExprId) -> &'hir hir::Ty {
-        &self.expr_tys[expr]
-    }
-
-    fn lower_ty(&self, ty: &'hir hir::Ty) -> mir::Ty {
+    fn lower_ty(&mut self, ty: HirTyId) -> mir::TyId {
         match ty {
             hir::Ty::Int => mir::Ty::Int,
             hir::Ty::UInt => mir::Ty::UInt,
@@ -171,7 +178,7 @@ impl<'hir> LowerInfo<'hir, '_> {
     }
 
     fn field_index(&self, ty: TyId, ident: Ident) -> u32 {
-        self.hir
+        self.ty_ctx
             .ty_info(ty)
             .fields
             .iter()

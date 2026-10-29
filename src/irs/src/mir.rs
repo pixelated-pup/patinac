@@ -1,5 +1,7 @@
 //! The mid-level intermediate representation of Patina. Lowered from the HIR, and used for code generation.
 
+use foldhash::fast::RandomState;
+use ordermap::OrderSet;
 use slotmap::{SlotMap, new_key_type};
 
 use ident::Ident;
@@ -17,58 +19,77 @@ use ident::Ident;
 /// - Pattern matching will have been lowered to switching on integers
 #[derive(Debug, Default)]
 pub struct Mir {
-    main: Option<Item>,
-    items: Vec<Item>,
-    exprs: SlotMap<ExprId, Expr>,
-    vars: SlotMap<VarId, VarInfo>,
+    main: Option<ItemId>,
+    items: SlotMap<ItemId, Item>,
+    tys: OrderSet<Ty, RandomState>,
 }
 
 impl Mir {
-    /// Returns all of the items.
-    pub fn items(&self) -> &[Item] {
-        &self.items
+    /// Returns an iterator over all of the items.
+    pub fn items(&self) -> impl Iterator<Item = (ItemId, &Item)> {
+        self.items.iter()
     }
 
-    /// Adds an item.
-    pub fn add_item(&mut self, item: Item) {
-        self.items.push(item);
+    /// Adds an item, returning a unique ID for it.
+    pub fn add_item(&mut self, item: Item) -> ItemId {
+        self.items.insert(item)
     }
 
     /// Returns the main function, if it exists.
-    pub const fn main(&self) -> Option<&Item> {
-        self.main.as_ref()
+    pub const fn main(&self) -> Option<ItemId> {
+        self.main
     }
 
     /// Sets the main function.
-    pub fn set_main(&mut self, main: Item) {
+    pub fn set_main(&mut self, main: ItemId) {
         self.main = Some(main);
     }
 }
 
-// Expr-related functions
 impl Mir {
-    /// Adds an expression, returning a unique ID for it.
-    pub fn add_expr(&mut self, expr: Expr) -> ExprId {
-        self.exprs.insert(expr)
+    /// Either interns the given type and returns a new ID for it,
+    /// or returns it's existing ID if it's already been interned.
+    pub fn intern_ty(&mut self, ty: Ty) -> TyId {
+        let (idx, _) = self.tys.insert_full(ty);
+        TyId(idx.try_into().expect("too many type IDs!"))
     }
 
-    /// Returns the actual expression associated with the given ID.
-    pub fn expr(&self, id: ExprId) -> &Expr {
-        &self.exprs[id]
+    /// Shorthand for `self.intern_ty(TyKind::Int)`.
+    pub fn int(&mut self) -> TyId {
+        self.intern_ty(Ty::Int)
+    }
+
+    /// Shorthand for `self.intern_ty(TyKind::UInt)`.
+    pub fn uint(&mut self) -> TyId {
+        self.intern_ty(Ty::UInt)
+    }
+
+    /// Shorthand for `self.intern_ty(TyKind::Byte)`.
+    pub fn byte(&mut self) -> TyId {
+        self.intern_ty(Ty::Byte)
+    }
+
+    /// Shorthand for `self.intern_ty(TyKind::Float)`.
+    pub fn float(&mut self) -> TyId {
+        self.intern_ty(Ty::Float)
+    }
+
+    /// Shorthand for `self.intern_ty(TyKind::Bool)`.
+    pub fn bool(&mut self) -> TyId {
+        self.intern_ty(Ty::Bool)
+    }
+
+    /// Returns the type corresponding to the given ID.
+    pub fn get_ty(&self, id: TyId) -> &Ty {
+        self.tys
+            .get_index(id.0 as usize)
+            .expect("TyId without corresponding Ty!")
     }
 }
 
-// Var-related functions
-impl Mir {
-    /// Adds a variable with the provided information, returning a unique ID for it.
-    pub fn add_var(&mut self, info: VarInfo) -> VarId {
-        self.vars.insert(info)
-    }
-
-    /// Returns the information for the given variable.
-    pub fn var(&self, id: VarId) -> &VarInfo {
-        &self.vars[id]
-    }
+new_key_type! {
+    /// An ID representing an item.
+    pub struct ItemId;
 }
 
 /// An item.
@@ -78,41 +99,90 @@ impl Mir {
 ///
 /// All information for user-defined types has been lowered into normal types,
 /// and methods have been fully desugared into regular functions.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Item {
-    /// The variable the item is associated with.
-    pub var: VarId,
-    /// The kind of the item (constant or function).
-    pub kind: ItemKind,
+#[derive(Debug)]
+pub enum Item {
+    /// A constant item.
+    ///
+    /// The definition of constant used here is more specific than a source-language constant: These are specifically constants with literal values.
+    /// All other constants are lazily-initialised and therefore lowered to functions.
+    Const(LitValue),
+    /// A function item.
+    Func(Func),
 }
 
-/// The information of an [`Item`] specific to whether it's a constant or function.
-#[derive(Debug, PartialEq, Eq)]
-pub enum ItemKind {
-    /// A constant item.
-    Const(ExprId),
-    /// A function item.
-    Func {
-        /// The function's parameters.
-        params: Vec<VarId>,
-        /// The body.
-        body: ExprId,
-    },
+/// A function item.
+#[derive(Debug)]
+pub struct Func {
+    /// The number of arguments to the function.
+    arg_count: u32,
+    /// The local variables of the function.
+    ///
+    /// The first `arg_count` are the function's arguments,
+    /// and the remainder are user-defined variables and temporaries
+    locals: SlotMap<VarId, VarInfo>,
+    /// The return type of the function.
+    ret_ty: TyId,
+    /// The basic blocks comprising the function's body.
+    blocks: SlotMap<BlockId, Block>,
+}
+
+impl Func {
+    /// Adds a variable with the provided information, returning a unique ID for it.
+    pub fn add_var(&mut self, info: VarInfo) -> VarId {
+        self.locals.insert(info)
+    }
+
+    /// Returns the information for the given variable.
+    pub fn var(&self, id: VarId) -> &VarInfo {
+        &self.locals[id]
+    }
 }
 
 new_key_type! {
-    /// An ID representing a variable. Information about the variable can be acquired through [`Mir::var`].
+    /// An ID representing a variable. Not a global ID, but rather per-function.
     pub struct VarId;
 }
 /// Information for a variable.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VarInfo {
     /// The name of the variable.
     pub ident: Ident,
     /// Whether the variable was declared mutable.
     pub mutable: bool,
     /// The type of the variable.
-    pub ty: Ty,
+    pub ty: TyId,
+}
+
+new_key_type! {
+    /// An ID representing a basic block. Not a global ID, but rather per-function.
+    pub struct BlockId;
+}
+
+/// A basic block of control flow.
+#[derive(Debug)]
+pub struct Block {
+    stmts: Vec<Stmt>,
+    term: Terminator,
+}
+
+/// The kinds of terminators, representing different ways to exit from a basic block.
+#[derive(Debug)]
+pub enum Terminator {
+    /// An unconditional jump.
+    Goto(BlockId),
+    /// A conditional switch on an integer.
+    ///
+    /// The last element of `targets` is the `else` branch,
+    /// so `targets.len() == values.len() + 1` must always hold.
+    Switch {
+        scrutinee: Value,
+        values: Vec<u64>,
+        targets: Vec<BlockId>,
+    },
+    /// Returning from the current function.
+    Return(Value),
+    /// Indicates an unreachable branch. UB if this is ever executed.
+    Unreachable,
 }
 
 /// A statement.
@@ -126,7 +196,7 @@ pub enum Stmt {
         value: Value,
     },
     /// An expression used as a statement, evaluated purely for side-effects.
-    Expr(ExprId),
+    // Expr(ExprId),
     /// A function call.
     Call {
         /// The function being called.
@@ -145,10 +215,6 @@ pub enum Arg {
     Place(Place),
 }
 
-new_key_type! {
-    /// An ID corresponding to an [`Expr`].
-    pub struct ExprId;
-}
 /// An expression.
 #[derive(Debug)]
 pub enum Expr {
@@ -157,7 +223,7 @@ pub enum Expr {
     /// A literal for a heterogenous aggreggate value (tuple or record).
     ///
     /// The two vecs should be the same lengths, forming field type - field value pairs.
-    Construct(Vec<Ty>, Vec<Value>),
+    Construct(Vec<TyId>, Vec<Value>),
     /// An infix operation.
     Infix {
         /// The infix operator used.
@@ -174,7 +240,6 @@ pub enum Expr {
         /// The value the operator is applied to.
         expr: Value,
     },
-
     /// A closure.
     Closure {
         /// The lifted function representing the closure body.
@@ -182,26 +247,9 @@ pub enum Expr {
         /// The captured variables.
         captures: Vec<VarId>,
     },
-    /// An if-then, with an optional else branch.
-    If {
-        /// The type that the if-then evaluates to.
-        ty: Ty,
-        /// The condition of the if.
-        cond: ExprId,
-        /// The "then" block.
-        th: BlockExpr,
-        /// The "else" block, if there is one.
-        el: Option<BlockExpr>,
-    },
-    /// An infinite loop.
-    Loop(BlockExpr),
-    /// A block, which executes each contained statement sequentially.
-    ///
-    /// Blocks evaluate to the value of the last statement, or unit if the last statement is not an expression.
-    Block(BlockExpr),
 
     /// TEMPORARY, until we have stdlib + FFI.
-    Print(Ty, ExprId),
+    Print(Value),
 }
 
 #[derive(Debug)]
@@ -214,24 +262,26 @@ pub enum Value {
     Move(Place),
     /// A scalar literal value. The specific kinds of literals are represented by [`LitValue`].
     Lit(LitValue),
+    Item(ItemId),
+    Zst,
 }
 
 #[derive(Debug)]
 pub struct Place {
-    base: VarId,
+    pub base: VarId,
     /// A list of field accesses applied to the base place.
     /// If this is empty, the place is a local variable.
-    accesses: Vec<FieldAccess>,
+    pub accesses: Vec<FieldAccess>,
 }
 
 #[derive(Debug)]
 pub struct FieldAccess {
-    idx: u32,
-    ty: Ty,
+    pub index: u32,
+    pub ty: TyId,
 }
 
 /// The kinds of [literal values][Value::Lit].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LitValue {
     /// A signed 64-bit integer.
     Int(i64),
@@ -246,7 +296,6 @@ pub enum LitValue {
 }
 
 /// A block of statements.
-#[derive(Debug)]
 pub struct BlockExpr(pub Vec<Stmt>);
 
 /// An infix operator.
@@ -297,8 +346,12 @@ pub enum PrefixOp {
     Neg,
 }
 
+/// An ID representing an interned type. Information about the type can be acquired through [`Hir::ty_kind`].
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TyId(u32);
+
 /// The kinds of types.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
     /// 64-bit signed integer.
     Int,
@@ -311,51 +364,55 @@ pub enum Ty {
     /// Truth value (`true`/`false`).
     Bool,
     /// A collection of heterogenous fields. Tuples and records both get lowered to this.
-    Fields(Vec<Self>),
+    Fields(Vec<TyId>),
     /// A first-class function value, implemented as a closure.
-    Func(Vec<Param>, Box<Self>),
+    Func(Vec<Param>, TyId),
 }
 
-impl Ty {
+impl Mir {
     /// Size of a pointer in bytes. FIXME: Support for non-64 bit architectures?
     const PTR_SIZE: u32 = 8;
 
-    /// Returns the inline size of this type, in bytes.
-    pub fn size(&self) -> u32 {
-        match self {
-            Self::Int | Self::UInt | Self::Float => 8,
-            Self::Byte | Self::Bool => 1,
-            Self::Fields(field_tys) => {
-                let align = self.alignment();
+    /// Returns the inline size of the provided type, in bytes.
+    pub fn size_of(&self, ty: TyId) -> u32 {
+        match self.get_ty(ty) {
+            Ty::Int | Ty::UInt | Ty::Float => 8,
+            Ty::Byte | Ty::Bool => 1,
+            Ty::Fields(field_tys) => {
+                let align = self.align_of(ty);
 
-                let base_size = field_tys.iter().fold(0, |sum, ty| {
-                    let align = ty.alignment();
+                let base_size = field_tys.iter().fold(0, |sum, &ty| {
+                    let align = self.align_of(ty);
                     let padding = (align - (sum % align)) % align;
-                    sum + padding + ty.size()
+                    sum + padding + self.size_of(ty)
                 });
 
                 let end_padding = (align - (base_size % align)) % align;
                 base_size + end_padding
             }
-            Self::Func(_, _) => Self::PTR_SIZE * 5, // Function, environment, drop, copy, equality.
+            Ty::Func(_, _) => Self::PTR_SIZE * 5, // Function, environment, drop, copy, equality.
         }
     }
 
     /// Returns the alignment of this type, in bytes.
-    pub fn alignment(&self) -> u32 {
-        match self {
-            Self::Int | Self::UInt | Self::Float | Self::Byte | Self::Bool => self.size(),
-            Self::Fields(field_tys) => field_tys.iter().map(Self::alignment).max().unwrap_or(1),
-            Self::Func(_, _) => Self::PTR_SIZE,
+    pub fn align_of(&self, ty: TyId) -> u32 {
+        match self.get_ty(ty) {
+            Ty::Int | Ty::UInt | Ty::Float | Ty::Byte | Ty::Bool => self.size_of(ty),
+            Ty::Fields(field_tys) => field_tys
+                .iter()
+                .map(|&ty| self.align_of(ty))
+                .max()
+                .unwrap_or(1),
+            Ty::Func(_, _) => Self::PTR_SIZE,
         }
     }
 }
 
 /// A parameter of a function type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Param {
     /// The type of the paremeter.
-    pub ty: Ty,
+    pub ty: TyId,
     /// Whether the parameter is mutable.
     pub mutable: bool,
 }

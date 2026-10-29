@@ -1,44 +1,49 @@
-use std::iter;
+use std::{iter, range::Range};
 
 use errors::Report;
 use ident::Ident;
 use irs::{
-    hir,
-    mir::{self, Item, ItemKind},
+    hir::{
+        self, ExprId, ExprKind, LitExpr, ty::{Ty as HirTy, TyId as HirTyId},
+    }, mir::{self, BlockId, FieldAccess, Item, Place, Value},
 };
 
 use crate::LowerInfo;
 
-impl LowerInfo<'_, '_> {
-    pub fn lower_expr(&mut self, expr: hir::ExprId) -> mir::ExprId {
-        let new_expr = match self.hir.expr(expr) {
-            hir::Expr::Var(var) => mir::Expr::Var(self.lower_var(*var)),
-            hir::Expr::Lit(lit) => mir::Expr::Lit(self.lower_lit(expr, lit)),
-            hir::Expr::Tuple(elems) => {
+impl LowerInfo<'_, '_, '_> {
+    pub fn lower_expr(&mut self, expr: hir::ExprId) -> Value {
+        let expr = self.hir.expr(expr);
+        match &expr.kind {
+            ExprKind::Var(var) => mir::Expr::Var(self.lower_var(*var)),
+            ExprKind::Lit(lit) => Value::Lit(self.lower_lit(lit, expr.span, expr.ty)),
+            ExprKind::Tuple(elems) => {
                 let (field_tys, values) = elems
                     .iter()
                     .map(|&elem| (self.lower_expr_ty(elem), self.lower_expr(elem)))
                     .unzip();
                 mir::Expr::Construct(field_tys, values)
             }
-            &hir::Expr::Infix { op, lhs, rhs } => mir::Expr::Infix {
-                op: convert_infix_op(op),
-                lhs: self.lower_expr(lhs),
-                rhs: self.lower_expr(rhs),
+            &ExprKind::Infix { op, lhs, rhs } => {
+                let tmp = self.
+                mir::Expr::Infix {
+                    op: convert_infix_op(op),
+                    lhs: self.lower_expr(lhs),
+                    rhs: self.lower_expr(rhs),
+                }
             },
-            &hir::Expr::Prefix { op, expr } => mir::Expr::Prefix {
+            &ExprKind::Prefix { op, expr } => mir::Expr::Prefix {
                 op: convert_prefix_op(op),
                 expr: self.lower_expr(expr),
             },
-            &hir::Expr::Field { base, field } => {
-                let hir::Ty::Named(ty) = self.expr_ty(base) else {
+            &ExprKind::Field { base, field } => {
+                let HirTy::Named(ty) = self.expr_ty(base) else {
                     unreachable!("field access of non-record type")
                 };
                 let base = self.lower_expr(base);
                 let field = self.field_index(*ty, field.ident);
                 mir::Expr::Field { base, field }
             }
-            hir::Expr::Call { func, args } => {
+            ExprKind::Call { func, args } => {
                 let func = self.lower_expr(*func);
                 let args = args
                     .iter()
@@ -51,10 +56,10 @@ impl LowerInfo<'_, '_> {
                 let ret_ty = self.lower_expr_ty(expr);
                 mir::Expr::Call { func, args, ret_ty }
             }
-            hir::Expr::MethodCall { base, method, args } => {
+            ExprKind::MethodCall { base, method, args } => {
                 todo!("Method Lowering")
                 // let method = self.hir.methods[&method.ident];
-                // let hir::Ty::Func(args, ret_ty) = self.hir.var_ty(method) else {
+                // let HirTy::Func(args, ret_ty) = self.hir.var_ty(method) else {
                 //     unreachable!("")
                 // }
                 // let base = mir::Arg {
@@ -72,61 +77,87 @@ impl LowerInfo<'_, '_> {
                 // let ret_ty = self.lower_expr_ty(expr);
                 // mir::Expr::Call { func, args, ret_ty }
             }
-            hir::Expr::Lambda {
+            ExprKind::Lambda {
                 params,
                 captures,
                 body,
             } => self.lower_lambda(expr, params, captures, *body),
-            &hir::Expr::Assign { place, value } => mir::Expr::Assign {
-                place: self.lower_expr(place),
-                value: self.lower_expr(value),
+            &ExprKind::Assign { place, value } => {
+                let stmt = mir::Stmt::Assign { 
+                    place: self.lower_place(place), 
+                    value: self.lower_expr(value) 
+                };
+                todo!();
+                mir::Value::Zst
             },
-            hir::Expr::If { cond, th, el } => mir::Expr::If {
+            ExprKind::If { cond, th, el } => mir::Expr::If {
                 ty: self.lower_expr_ty(expr),
                 cond: self.lower_expr(*cond),
                 th: self.lower_block_expr(th),
                 el: el.as_ref().map(|el| self.lower_block_expr(el)),
             },
-            hir::Expr::For { .. } => todo!("For Loops"),
-            hir::Expr::Loop(body) => mir::Expr::Loop(self.lower_block_expr(body)),
-            hir::Expr::Break => todo!("Unconditional Control Flow"),
-            hir::Expr::Continue => todo!("Unconditional Control Flow"),
-            hir::Expr::Return(_) => todo!("Unconditional Control Flow"),
-            hir::Expr::Block(block) => mir::Expr::Block(self.lower_block_expr(block)),
+            ExprKind::For { .. } => todo!("For Loops"),
+            ExprKind::Loop(body) => mir::Expr::Loop(self.lower_block_expr(body)),
+            ExprKind::Break => todo!("Unconditional Control Flow"),
+            ExprKind::Continue => todo!("Unconditional Control Flow"),
+            ExprKind::Return(_) => todo!("Unconditional Control Flow"),
+            ExprKind::Block(block) => mir::Expr::Block(self.lower_block_expr(block)),
 
-            &hir::Expr::Print(expr) => {
+            &ExprKind::Print(expr) => {
                 mir::Expr::Print(self.lower_expr_ty(expr), self.lower_expr(expr))
             }
-        };
-        self.mir.add_expr(new_expr)
+        }
     }
 
-    fn lower_lit(&self, expr: hir::ExprId, lit: &hir::LitExpr) -> mir::LitValue {
+    fn lower_place(&mut self, expr: ExprId) -> Place {
+        let expr = self.hir.expr(expr);
+        match &expr.kind {
+            ExprKind::Var(id) => {
+                let var: mir::VarId = todo!();
+                Place { base: var, accesses: Vec::new() }
+            },
+            ExprKind::Field { base, field } => {
+                let HirTy::Named { fields, .. } = self.ty_ctx.get(self.hir.expr(*base).ty) else {
+                    unreachable!("field access of non-record type")
+                };
+                let mut place = self.lower_place(*base);
+                let index = fields.get_index_of(&field.ident).expect("ICE: Missing Field").try_into().expect("ICE: Too Many Fields");
+                place.accesses.push(FieldAccess {
+                    index,
+                    ty: self.lower_ty(expr.ty)
+                });
+                place
+            }
+            _ => unreachable!("ICE: not a place"),
+        }
+    }
+
+    fn lower_lit(&self, lit: &LitExpr, span: Range<u32>, ty: HirTyId) -> mir::LitValue {
         match lit {
-            &hir::LitExpr::Int(value) => match self.expr_ty(expr) {
-                hir::Ty::Int => {
+            &LitExpr::Int(value) => match self.ty_ctx.get(ty) {
+                HirTy::Int => {
                     let i = i64::try_from(value).unwrap_or_else(|_| {
                         self.handler.report(
                             Report::warning(format!(
                                 "int literal {value} overflowed and was clamped to {}",
                                 i64::MAX
                             )),
-                            self.hir.expr_span(expr),
+                            span,
                             self.module,
                         );
                         i64::MAX
                     });
                     mir::LitValue::Int(i)
                 }
-                hir::Ty::UInt => mir::LitValue::UInt(value),
-                hir::Ty::Byte => {
+                HirTy::UInt => mir::LitValue::UInt(value),
+                HirTy::Byte => {
                     let b = u8::try_from(value).unwrap_or_else(|_| {
                         self.handler.report(
                             Report::warning(format!(
                                 "byte literal {value} overflowed and was clamped to {}",
                                 u8::MAX
                             )),
-                            self.hir.expr_span(expr),
+                            span,
                             self.module,
                         );
                         u8::MAX
@@ -135,9 +166,9 @@ impl LowerInfo<'_, '_> {
                 }
                 _ => unreachable!("not an int type"),
             },
-            &hir::LitExpr::Float(value) => mir::LitValue::Float(value),
+            &LitExpr::Float(value) => mir::LitValue::Float(value),
             hir::LitExpr::String(_) => todo!("Strings"),
-            &hir::LitExpr::Bool(value) => mir::LitValue::Bool(value),
+            &LitExpr::Bool(value) => mir::LitValue::Bool(value),
         }
     }
 
