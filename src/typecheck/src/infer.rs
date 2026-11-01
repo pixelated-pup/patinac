@@ -1,8 +1,8 @@
 use std::range::Range;
 
 use ident::SpanIdent;
-use irs::hir::{
-    BlockExpr, ExprId, ExprKind, InfixOp, LitExpr, PrefixOp, Stmt,
+use irs::{
+    hir::{BlockExpr, ExprId, ExprKind, InfixOp, LitExpr, PrefixOp, Stmt},
     ty::{Param, Ty, TyId},
 };
 

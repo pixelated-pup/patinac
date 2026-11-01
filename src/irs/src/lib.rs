@@ -3,6 +3,7 @@
 pub mod ast;
 pub mod hir;
 pub mod mir;
+pub mod ty;
 
 use slotmap::{SlotMap, new_key_type};
 

@@ -8,10 +8,8 @@ use std::{iter, range::Range};
 use errors::{ErrorHandler, HandledError, Result};
 use irs::{
     ModuleId,
-    hir::{
-        DefKind, ExprId, Hir,
-        ty::{Ty, TyContext, TyId},
-    },
+    hir::{DefKind, ExprId, Hir},
+    ty::{Ty, TyContext, TyId},
 };
 
 use crate::error::ErrorKind;
