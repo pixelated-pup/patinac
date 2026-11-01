@@ -1,15 +1,12 @@
 //! The high-level intermediate representation of Patina. Produced after name resolution, and used for typechecking.
 
-pub mod ty;
-
 use std::range::Range;
 
 use slotmap::{SlotMap, new_key_type};
 
 use ident::SpanIdent;
 
-use crate::ModuleId;
-use ty::TyId;
+use crate::{ModuleId, ty::TyId};
 
 /// An AST-like structure, with additional metadata in the form of type information and resolved variable identifiers.
 #[derive(Debug, Default)]

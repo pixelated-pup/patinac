@@ -1,4 +1,7 @@
-//! HIR types and type-related items.
+//! Types and type-related items.
+//!
+//! This is a semantic representation of a type used by the HIR and MIR,
+//! as opposed to the syntactic types used by the AST.
 
 use std::{
     cell::RefCell,

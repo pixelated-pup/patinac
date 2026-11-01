@@ -1,6 +1,6 @@
 use errors::{Diagnostic, Report};
 use ident::Ident;
-use irs::hir::ty::{TyContext, TyId};
+use irs::ty::{TyContext, TyId};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ErrorKind {
