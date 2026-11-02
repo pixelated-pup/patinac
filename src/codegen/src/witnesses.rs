@@ -4,7 +4,7 @@ use inkwell::{
     values::{BasicValue as _, FunctionValue},
 };
 
-use irs::mir::{Ty, VarId};
+use irs::mir::{Ty, LocalId};
 
 use crate::{CodegenState, layout};
 
@@ -603,7 +603,7 @@ impl<'ctx> CodegenState<'_, 'ctx> {
     pub(crate) fn closure_drop(
         &self,
         name: &str,
-        captures: &[VarId],
+        captures: &[LocalId],
         env_ty: Option<StructType<'ctx>>,
     ) -> FunctionValue<'ctx> {
         let func_name = format!("{name}.drop");
@@ -662,7 +662,7 @@ impl<'ctx> CodegenState<'_, 'ctx> {
     pub(crate) fn closure_copy(
         &self,
         name: &str,
-        captures: &[VarId],
+        captures: &[LocalId],
         env_ty: Option<StructType<'ctx>>,
     ) -> FunctionValue<'ctx> {
         let func_name = format!("{name}.copy");
@@ -743,7 +743,7 @@ impl<'ctx> CodegenState<'_, 'ctx> {
     pub(crate) fn closure_equals(
         &self,
         name: &str,
-        captures: &[VarId],
+        captures: &[LocalId],
         env_ty: Option<StructType<'ctx>>,
     ) -> FunctionValue<'ctx> {
         let func_name = format!("{name}.equals");

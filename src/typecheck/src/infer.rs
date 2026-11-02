@@ -24,10 +24,10 @@ impl TypeChecker<'_, '_, '_> {
                 let elem_tys = self.infer_exprs(exprs);
                 self.ty_ctx.intern_ty(Ty::Tuple(elem_tys))
             }
-            ExprKind::Infix { op, lhs, rhs } => self.infer_expr_infix(*op, *lhs, *rhs),
-            ExprKind::Prefix { op, expr } => self.infer_expr_prefix(*op, *expr),
+            ExprKind::Infix(op, lhs, rhs) => self.infer_expr_infix(*op, *lhs, *rhs),
+            ExprKind::Prefix(op, expr) => self.infer_expr_prefix(*op, *expr),
             ExprKind::Field { base, field } => self.infer_expr_field(*base, *field, expr.span),
-            ExprKind::Call { func, args } => {
+            ExprKind::Call { callee, args } => {
                 let arg_tys: Vec<_> = args
                     .iter()
                     .map(|arg| Param {
@@ -37,7 +37,7 @@ impl TypeChecker<'_, '_, '_> {
                     .collect();
                 let ret_ty = self.ty_ctx.fresh_var();
                 let func_ty = self.ty_ctx.intern_ty(Ty::Func(arg_tys, ret_ty));
-                self.unify_expr_ty(*func, func_ty);
+                self.unify_expr_ty(*callee, func_ty);
                 ret_ty
             }
             ExprKind::MethodCall { base, method, args } => {
@@ -195,7 +195,7 @@ impl TypeChecker<'_, '_, '_> {
                 self.report(ErrorKind::OpaqueType(base_ty), base.span, base.module);
             }
             Ty::Named { fields, .. } if let Some(field) = fields.get(&field_name.ident) => {
-                self.unify_ty_ty(field_ty, field.ty, span, base.module);
+                self.unify_ty_ty(field_ty, *field, span, base.module);
             }
             Ty::Named { .. } => {
                 self.report(

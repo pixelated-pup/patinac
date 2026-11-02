@@ -3,7 +3,7 @@ use inkwell::{
     values::{BasicMetadataValueEnum, BasicValue as _, BasicValueEnum, PointerValue},
 };
 
-use irs::mir::{Arg, BlockExpr, Expr, ExprId, InfixOp, LitValue, PrefixOp, Stmt, Ty, VarId};
+use irs::mir::{Arg, BlockExpr, Expr, ExprId, InfixOp, LitValue, LocalId, PrefixOp, Stmt, Ty};
 
 use crate::{
     CodegenState,
@@ -16,8 +16,8 @@ impl<'mir, 'ctx> CodegenState<'mir, 'ctx> {
             Expr::Var(id) => self.emit_ident(*id),
             Expr::Lit(lit) => self.emit_lit(lit),
             Expr::Construct(field_tys, values) => self.emit_construct(field_tys, values),
-            Expr::Infix { op, lhs, rhs } => self.emit_infix(*op, *lhs, *rhs),
-            Expr::Prefix { op, expr } => self.emit_prefix(*op, *expr),
+            Expr::Infix(op, lhs, rhs) => self.emit_infix(*op, *lhs, *rhs),
+            Expr::Prefix(op, expr) => self.emit_prefix(*op, *expr),
             Expr::Field { base, field } => self.emit_field(*base, *field),
             Expr::Call { func, args, ret_ty } => self.emit_call(*func, args, ret_ty),
             Expr::Closure { func, captures } => self.emit_closure(*func, captures),
@@ -95,7 +95,7 @@ impl<'mir, 'ctx> CodegenState<'mir, 'ctx> {
         }
     }
 
-    fn emit_ident(&self, id: VarId) -> LayoutValue<'mir, 'ctx> {
+    fn emit_ident(&self, id: LocalId) -> LayoutValue<'mir, 'ctx> {
         self.build_dup(self.vars[id])
     }
 
@@ -335,7 +335,7 @@ impl<'mir, 'ctx> CodegenState<'mir, 'ctx> {
         }
     }
 
-    fn emit_closure(&self, func: VarId, captures: &[VarId]) -> LayoutValue<'mir, 'ctx> {
+    fn emit_closure(&self, func: LocalId, captures: &[LocalId]) -> LayoutValue<'mir, 'ctx> {
         // Create the environment, if one is needed
         let (env, env_ty) = if captures.is_empty() {
             (self.const_null(), None)

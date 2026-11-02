@@ -159,21 +159,9 @@ pub enum ExprKind {
     /// A tuple literal.
     Tuple(Vec<ExprId>),
     /// An infix operation.
-    Infix {
-        /// The infix operator used.
-        op: InfixOp,
-        /// The left-hand side of the operation.
-        lhs: ExprId,
-        /// The right-hand side of the operation.
-        rhs: ExprId,
-    },
+    Infix(InfixOp, ExprId, ExprId),
     /// A prefix operation.
-    Prefix {
-        /// The prefix operator used.
-        op: PrefixOp,
-        /// The base expression the operator is applied to.
-        expr: ExprId,
-    },
+    Prefix(PrefixOp, ExprId),
     /// Record field access.
     Field {
         /// The base expression from which the field is being accessed.
@@ -184,7 +172,7 @@ pub enum ExprKind {
     /// A function call.
     Call {
         /// The function being called.
-        func: ExprId,
+        callee: ExprId,
         /// The list of arguments being applied.
         args: Vec<Arg>,
     },

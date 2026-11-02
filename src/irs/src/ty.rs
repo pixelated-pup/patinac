@@ -16,9 +16,12 @@ use foldhash::fast::RandomState;
 use itertools::Itertools as _;
 use ordermap::{OrderMap, OrderSet};
 
-use ident::{Ident, SpanIdent};
+use ident::Ident;
 
 use crate::{ModuleId, hir::VarId};
+
+/// Size of a pointer in bytes. FIXME: Support for non-64 bit architectures?
+pub const PTR_SIZE: u32 = 8;
 
 /// Interns and unifies types.
 pub struct TyContext {
@@ -106,42 +109,78 @@ impl TyContext {
         self.unif_table.borrow_mut().union(a, b);
     }
 
-    // /// Reserves a user-defined type, storing only it's name and returning a unique ID for it.
-    // ///
-    // /// This allows getting an ID for a type before having the full information for it.
-    // /// The reservation should be fullfilled with [`fulfill_ty`][Self::fulfill_ty] as soon as possible.
-    // pub fn reserve_ty(&mut self, ident: SpanIdent) -> TyId {
-    //     self.tys.insert(ident)
-    // }
+    /// Returns the inline size of the provided type, in bytes.
+    ///
+    /// # Panics
+    /// Panics if the provided type is a [`Ty::Var`] or [`Ty::IntVar`].
+    pub fn size_of(&self, ty: TyId) -> u32 {
+        match self.get(ty) {
+            Ty::Int | Ty::UInt | Ty::Float => 8,
+            Ty::Byte | Ty::Bool => 1,
+            Ty::Tuple(elem_tys) => todo!(),
+            // Ty::Fields(field_tys) => {
+            //     let align = self.align_of(ty);
 
-    // /// Fulfills a previously-reserved user-defined type, providing the rest of the information for the type.
-    // ///
-    // /// See [`reserve_ty`][Self::reserve_ty] for more information.
-    // pub fn fulfill_ty(&mut self, id: TyId, info: TyInfo) {
-    //     self.ty_info.insert(id, info);
-    // }
+            //     let base_size = field_tys.iter().fold(0, |sum, &ty| {
+            //         let align = self.align_of(ty);
+            //         let padding = (align - (sum % align)) % align;
+            //         sum + padding + self.size_of(ty)
+            //     });
 
-    // /// Adds a method to an existing type.
-    // ///
-    // /// # Panics
-    // /// Panics if the type has not been [`fulfilled`][Self::fulfill_ty].
-    // pub fn add_method(&mut self, ty: TyId, method: VarId) {
-    //     let method_name = self.vars[method].ident.ident;
-    //     self.methods[ty].insert(method_name, method);
-    // }
+            //     let end_padding = (align - (base_size % align)) % align;
+            //     base_size + end_padding
+            // }
+            Ty::Func(_, _) => PTR_SIZE * 5, // Function, environment, drop, copy, equality.
+            Ty::Named {
+                ident,
+                opaque,
+                fields,
+                ctor,
+                module,
+            } => todo!(),
+            Ty::Var(_) | Ty::IntVar(_) => panic!("Attempted to get size of type variable"),
+        }
+    }
 
-    // /// Returns the name of the given type.
-    // pub fn ty_ident(&self, id: TyId) -> SpanIdent {
-    //     self.tys[id]
-    // }
+    /// Returns the alignment of the provided type, in bytes.
+    ///
+    /// # Panics
+    /// Panics if the provided type is a [`Ty::Var`] or [`Ty::IntVar`].
+    pub fn align_of(&self, ty: TyId) -> u32 {
+        match self.get(ty) {
+            Ty::Int | Ty::UInt | Ty::Float | Ty::Byte | Ty::Bool => self.size_of(ty),
+            Ty::Tuple(elem_tys) => elem_tys
+                .iter()
+                .map(|ty| self.align_of(*ty))
+                .max()
+                .unwrap_or(1),
+            Ty::Func(_, _) => PTR_SIZE,
+            Ty::Named { fields, .. } => fields
+                .iter()
+                .map(|(_, ty)| self.align_of(*ty))
+                .max()
+                .unwrap_or(1),
+            Ty::Var(_) | Ty::IntVar(_) => panic!("Attempted to get alignment of type variable"),
+        }
+    }
 
-    // /// Returns the information for the given type.
-    // ///
-    // /// # Panics
-    // /// Panics if the type was reserved with [`reserve_ty`][Self::reserve_ty], but not yet fulfilled with [`fulfill_ty`][Self::fulfill_ty].
-    // pub fn ty_info(&self, id: TyId) -> &TyInfo {
-    //     &self.ty_info[id]
-    // }
+    /// Returns whether the provided type is a ZST (zero-sized type).
+    /// More efficient than calculating the size and checking if it's 0.
+    ///
+    /// # Panics
+    /// Panics if the provided type is a [`Ty::Var`] or [`Ty::IntVar`].
+    pub fn is_zst(&self, ty: TyId) -> bool {
+        match self.get(ty) {
+            Ty::Int | Ty::UInt | Ty::Float | Ty::Byte | Ty::Bool | Ty::Func(_, _) => false,
+            Ty::Tuple(elem_tys) => {
+                elem_tys.is_empty() || elem_tys.iter().all(|ty| self.is_zst(*ty))
+            }
+            Ty::Named { fields, .. } => {
+                fields.is_empty() || fields.iter().all(|(_, ty)| self.is_zst(*ty))
+            }
+            Ty::Var(_) | Ty::IntVar(_) => panic!("Attempted to get size of type variable"),
+        }
+    }
 }
 
 /// An ID representing an interned type. Information about the type can be acquired through [`Hir::ty_kind`].
@@ -195,7 +234,7 @@ pub enum Ty {
         /// Whether the type is opaque (meaning it's fields/variants are private).
         opaque: bool,
         /// The fields of the type.
-        fields: OrderMap<Ident, Field>,
+        fields: OrderMap<Ident, TyId>,
         /// The ID of the type's constructor function.
         ctor: VarId,
         /// The module containing the type's definition.
@@ -230,15 +269,6 @@ impl Param {
     pub const fn display(self, ctx: &TyContext) -> ParamDisplay<'_> {
         ParamDisplay(self, ctx)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-/// A field of a `record` or of a `union` variant.
-pub struct Field {
-    /// The name of the field.
-    pub ident: SpanIdent,
-    /// The type of the field.
-    pub ty: TyId,
 }
 
 /// A helper to display a `TyId` using information from the `TyContext`.

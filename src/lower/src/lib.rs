@@ -1,8 +1,4 @@
 //! Lowers a [`Hir`] into a [`Mir`].
-//! This involves the following:
-//! - Unifying records and tuples, and rearranging their fields for best packing.
-//! - Lowering field access to a numeric field number.
-//! - Seperating integer literals into specific types, and emitting warnings if the literal overflows the type.
 
 mod exprs;
 
@@ -14,97 +10,135 @@ use errors::ErrorHandler;
 use ident::Ident;
 use irs::{
     ModuleId,
-    hir::{
-        self, DefItem, DefKind, ExprId, Hir,
-        ty::{Ty as HirTy, TyContext, TyId as HirTyId},
-    },
-    mir::{self, BlockId, Item, ItemId, Mir, VarInfo},
+    hir::{self, DefItem, DefKind, ExprId, Hir, VarId},
+    mir::{self, Block, BlockId, Func, Item, ItemId, Local, LocalId, Mir, Terminator},
+    ty::{Ty, TyContext, TyId},
 };
 
-struct LowerInfo<'hir, 'ty_ctx, 'err> {
-    hir: &'hir Hir,
-    ty_ctx: &'ty_ctx TyContext,
-    handler: ErrorHandler<'err>,
-    mir: Mir,
-    var_map: SecondaryMap<hir::VarId, mir::VarId>,
+struct LowerInfo<'ext, 'func> {
+    hir: &'ext Hir,
+    ty_ctx: &'ext TyContext,
+    handler: ErrorHandler<'ext>,
+    var_map: SecondaryMap<hir::VarId, mir::LocalId>,
     module: ModuleId,
     lambda_counter: u32,
-    func: ItemId,
+    func: &'func mut Func,
     block: BlockId,
 }
 
-/// Resolves and lowers the provided [`Package`] into a single [`Hir`].
-///
-/// # Errors
-/// Returns an error if there are any unbound variables, undefined types, or multiple items with the same name.
+/// Lowers the provided [`Hir`] into a [`Mir`].
 pub fn lower(hir: &Hir, ty_ctx: &TyContext, handler: ErrorHandler<'_>) -> Mir {
-    LowerInfo {
+    // for id in self.hir.tys() {
+    //     self.lower_ctor(id);
+    // }
+
+    // for item in self.hir.defs() {
+    //     let item = self.lower_item(item);
+    //     self.mir.add_item(item);
+    // }
+
+    // if let Some(main) = self.hir.main() {
+    //     let main = self.lower_item(main);
+    //     self.mir.set_main(main);
+    // }
+
+    // self.mir
+    todo!()
+}
+
+fn lower_func(
+    hir: &Hir,
+    ty_ctx: &TyContext,
+    handler: ErrorHandler<'_>,
+    params: Vec<VarId>,
+    body: ExprId,
+    module: ModuleId,
+) -> Func {
+    let mut func = Func::new(params.len(), hir.expr(body).ty);
+
+    // Set up function parameters.
+    let mut var_map = SecondaryMap::new();
+    for param in params {
+        let info = hir.var_info(param);
+        let local = func.add_local(Local {
+            ident: Some(info.ident.ident),
+            mutable: info.mutable,
+            ty: info.ty,
+        });
+        var_map.insert(param, local);
+    }
+
+    let entry = func.add_block();
+
+    let mut builder = LowerInfo {
         hir,
         ty_ctx,
         handler,
-        mir: Mir::default(),
-        var_map: SecondaryMap::new(),
-        module: ModuleId::default(),
+        var_map,
+        module,
         lambda_counter: 0,
-        func: ItemId::default(),
-        block: BlockId::default(),
-    }
-    .lower()
+        func: &mut func,
+        block: entry,
+    };
+
+    // Lower the function body and build the function return.
+    let ret_value = builder.lower_as_value(body);
+    builder.set_term(mir::Terminator::Return(ret_value));
+
+    func
 }
 
-impl<'hir> LowerInfo<'hir, '_, '_> {
-    fn lower(mut self) -> Mir {
-        // Build constructors, populating the field map along the way.
-        for id in self.hir.tys() {
-            self.lower_ctor(id);
-        }
-
-        for item in self.hir.defs() {
-            let item = self.lower_item(item);
-            self.mir.add_item(item);
-        }
-
-        if let Some(main) = self.hir.main() {
-            let main = self.lower_item(main);
-            self.mir.set_main(main);
-        }
-
-        self.mir
+impl LowerInfo<'_, '_> {
+    fn block_mut(&mut self) -> &mut Block {
+        self.func.block_mut(self.block)
     }
 
-    fn lower_func(
-        &mut self,
-        var: hir::VarId,
-        params: Vec<hir::VarId>,
-        body: ExprId,
-    ) -> mir::ItemId {
+    fn add_stmt(&mut self, stmt: mir::Stmt) {
+        self.block_mut().stmts.push(stmt);
     }
 
-    fn lower_var(&mut self, var: hir::VarId) -> mir::VarId {
+    fn set_term(&mut self, term: Terminator) {
+        self.block_mut().term = Some(term);
+    }
+
+    fn lower_local(&mut self, var: VarId) -> LocalId {
         match self.var_map.get(var) {
             Some(var) => *var,
             None => {
-                let var_info = self.hir.var_info(var);
-                let ty = self.lower_ty(self.hir.var_ty(var));
-                let new_var = self.mir.add_var(VarInfo {
-                    ident: var_info.ident.ident,
-                    ty,
-                    mutable: var_info.mutable,
+                let info = self.hir.var_info(var);
+                assert!(
+                    !info.global,
+                    "Variables representing top-level items should not be lowered to MIR locals"
+                );
+                let local = self.func.add_local(Local {
+                    ident: Some(info.ident.ident),
+                    ty: info.ty,
+                    mutable: info.mutable,
                 });
-                self.var_map.insert(var, new_var);
-                new_var
+                self.var_map.insert(var, local);
+                local
             }
         }
     }
 
+    fn lower_global(&mut self, var: VarId) -> ItemId {
+        let info = self.hir.var_info(var);
+        assert!(
+            info.global,
+            "Only variables representing top-level items should be lowered to MIR globals"
+        );
+
+        todo!()
+    }
+
     fn lower_ctor(&mut self, ty: TyId) {
-        let var = self.lower_var(self.hir.ty_info(ty).ctor);
+        let var = self.lower_local(self.hir.ty_info(ty).ctor);
 
         let field_tys = self.layout_record_fields(ty);
         let (params, values) = field_tys
             .iter()
             .map(|ty| {
-                let var = self.mir.add_var(VarInfo {
+                let var = self.mir.add_var(Local {
                     ident: Ident::new("f"),
                     ty: ty.clone(),
                     mutable: false,
@@ -119,72 +153,5 @@ impl<'hir> LowerInfo<'hir, '_, '_> {
             var,
             kind: ItemKind::Func { params, body },
         });
-    }
-
-    fn lower_item(&mut self, item: &DefItem) -> Item {
-        self.module = item.module;
-        let kind = match &item.kind {
-            DefKind::Const(val) => ItemKind::Const(self.lower_expr(*val)),
-            DefKind::Func { params, body } => {
-                let params = params.iter().map(|var| self.lower_var(*var)).collect();
-                let body = self.lower_expr(*body);
-                ItemKind::Func { params, body }
-            }
-        };
-        Item {
-            var: self.lower_var(item.var),
-            kind,
-        }
-    }
-
-    fn lower_ty(&mut self, ty: HirTyId) -> mir::TyId {
-        match ty {
-            hir::Ty::Int => mir::Ty::Int,
-            hir::Ty::UInt => mir::Ty::UInt,
-            hir::Ty::Byte => mir::Ty::Byte,
-            hir::Ty::Float => mir::Ty::Float,
-            hir::Ty::Bool => mir::Ty::Bool,
-            hir::Ty::Tuple(elem_tys) => mir::Ty::Fields(self.layout_fields(elem_tys)),
-            hir::Ty::Func(params, ret_ty) => {
-                let params = params
-                    .iter()
-                    .map(|param| mir::Param {
-                        ty: self.lower_ty(&param.ty),
-                        mutable: param.mutable,
-                    })
-                    .collect();
-                let ret_ty = Box::new(self.lower_ty(ret_ty));
-                mir::Ty::Func(params, ret_ty)
-            }
-            hir::Ty::Named(id) => mir::Ty::Fields(self.layout_record_fields(*id)),
-        }
-    }
-
-    fn layout_fields(&self, field_tys: impl IntoIterator<Item = &'hir hir::Ty>) -> Vec<mir::Ty> {
-        field_tys.into_iter().map(|ty| self.lower_ty(ty)).collect()
-    }
-
-    fn layout_record_fields(&self, ty: TyId) -> Vec<mir::Ty> {
-        self.hir
-            .ty_info(ty)
-            .fields
-            .iter()
-            .map(|field| self.lower_ty(&field.ty))
-            .collect()
-    }
-
-    fn lower_expr_ty(&self, expr: hir::ExprId) -> mir::Ty {
-        self.lower_ty(self.expr_ty(expr))
-    }
-
-    fn field_index(&self, ty: TyId, ident: Ident) -> u32 {
-        self.ty_ctx
-            .ty_info(ty)
-            .fields
-            .iter()
-            .position(|field| field.ident.ident == ident)
-            .expect("type does not have that field")
-            .try_into()
-            .expect("too many fields")
     }
 }

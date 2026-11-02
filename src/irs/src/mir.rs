@@ -1,10 +1,10 @@
 //! The mid-level intermediate representation of Patina. Lowered from the HIR, and used for code generation.
 
-use foldhash::fast::RandomState;
-use ordermap::OrderSet;
 use slotmap::{SlotMap, new_key_type};
 
 use ident::Ident;
+
+use crate::ty::{TyContext, TyId};
 
 /// The mid-level intermediate representation of Patina.
 ///
@@ -21,7 +21,6 @@ use ident::Ident;
 pub struct Mir {
     main: Option<ItemId>,
     items: SlotMap<ItemId, Item>,
-    tys: OrderSet<Ty, RandomState>,
 }
 
 impl Mir {
@@ -43,47 +42,6 @@ impl Mir {
     /// Sets the main function.
     pub fn set_main(&mut self, main: ItemId) {
         self.main = Some(main);
-    }
-}
-
-impl Mir {
-    /// Either interns the given type and returns a new ID for it,
-    /// or returns it's existing ID if it's already been interned.
-    pub fn intern_ty(&mut self, ty: Ty) -> TyId {
-        let (idx, _) = self.tys.insert_full(ty);
-        TyId(idx.try_into().expect("too many type IDs!"))
-    }
-
-    /// Shorthand for `self.intern_ty(TyKind::Int)`.
-    pub fn int(&mut self) -> TyId {
-        self.intern_ty(Ty::Int)
-    }
-
-    /// Shorthand for `self.intern_ty(TyKind::UInt)`.
-    pub fn uint(&mut self) -> TyId {
-        self.intern_ty(Ty::UInt)
-    }
-
-    /// Shorthand for `self.intern_ty(TyKind::Byte)`.
-    pub fn byte(&mut self) -> TyId {
-        self.intern_ty(Ty::Byte)
-    }
-
-    /// Shorthand for `self.intern_ty(TyKind::Float)`.
-    pub fn float(&mut self) -> TyId {
-        self.intern_ty(Ty::Float)
-    }
-
-    /// Shorthand for `self.intern_ty(TyKind::Bool)`.
-    pub fn bool(&mut self) -> TyId {
-        self.intern_ty(Ty::Bool)
-    }
-
-    /// Returns the type corresponding to the given ID.
-    pub fn get_ty(&self, id: TyId) -> &Ty {
-        self.tys
-            .get_index(id.0 as usize)
-            .expect("TyId without corresponding Ty!")
     }
 }
 
@@ -113,40 +71,77 @@ pub enum Item {
 /// A function item.
 #[derive(Debug)]
 pub struct Func {
-    /// The number of arguments to the function.
-    arg_count: u32,
+    /// The number of parameters that the function has.
+    pub param_count: usize,
+    /// The return type of the function.
+    pub ret_ty: TyId,
     /// The local variables of the function.
     ///
     /// The first `arg_count` are the function's arguments,
     /// and the remainder are user-defined variables and temporaries
-    locals: SlotMap<VarId, VarInfo>,
-    /// The return type of the function.
-    ret_ty: TyId,
+    pub locals: SlotMap<LocalId, Local>,
     /// The basic blocks comprising the function's body.
-    blocks: SlotMap<BlockId, Block>,
+    pub blocks: SlotMap<BlockId, Block>,
 }
 
 impl Func {
-    /// Adds a variable with the provided information, returning a unique ID for it.
-    pub fn add_var(&mut self, info: VarInfo) -> VarId {
-        self.locals.insert(info)
+    pub fn new(param_count: usize, ret_ty: TyId) -> Self {
+        Self {
+            param_count,
+            ret_ty,
+            locals: SlotMap::default(),
+            blocks: SlotMap::default(),
+        }
+    }
+
+    /// Adds a local variable with the provided information, returning a unique ID for it.
+    pub fn add_local(&mut self, var: Local) -> LocalId {
+        self.locals.insert(var)
     }
 
     /// Returns the information for the given variable.
-    pub fn var(&self, id: VarId) -> &VarInfo {
+    pub fn local(&self, id: LocalId) -> &Local {
         &self.locals[id]
+    }
+
+    /// Adds a temporary variable of the provided type (immutable, no name).
+    pub fn add_temp(&mut self, ty: TyId) -> LocalId {
+        self.add_local(Local {
+            ident: None,
+            mutable: false,
+            ty,
+        })
+    }
+
+    pub fn add_block(&mut self) -> BlockId {
+        self.blocks.insert(Block {
+            stmts: Vec::new(),
+            term: None,
+        })
+    }
+
+    pub fn block(&self, block: BlockId) -> &Block {
+        &self.blocks[block]
+    }
+
+    pub fn block_mut(&mut self, block: BlockId) -> &mut Block {
+        &mut self.blocks[block]
+    }
+
+    pub fn add_stmt(&mut self, block: BlockId, stmt: Stmt) {
+        self.block_mut(block).stmts.push(stmt);
     }
 }
 
 new_key_type! {
-    /// An ID representing a variable. Not a global ID, but rather per-function.
-    pub struct VarId;
+    /// An ID representing a local variable. Not a global ID, but rather per-function.
+    pub struct LocalId;
 }
-/// Information for a variable.
+/// Information for a local variable.
 #[derive(Debug, Clone, PartialEq)]
-pub struct VarInfo {
-    /// The name of the variable.
-    pub ident: Ident,
+pub struct Local {
+    /// The name of the variable, if there is one (`None` for e.g. temporaries).
+    pub ident: Option<Ident>,
     /// Whether the variable was declared mutable.
     pub mutable: bool,
     /// The type of the variable.
@@ -161,8 +156,20 @@ new_key_type! {
 /// A basic block of control flow.
 #[derive(Debug)]
 pub struct Block {
-    stmts: Vec<Stmt>,
-    term: Terminator,
+    pub stmts: Vec<Stmt>,
+    /// The terminator of the block.
+    ///
+    /// Should only be `None` during construction,
+    /// and should usually be accessed through [`Block::terminator`].
+    pub term: Option<Terminator>,
+}
+
+impl Block {
+    pub fn terminator(&self) -> &Terminator {
+        self.term
+            .as_ref()
+            .expect("Accessed terminator of incomplete block")
+    }
 }
 
 /// The kinds of terminators, representing different ways to exit from a basic block.
@@ -170,14 +177,14 @@ pub struct Block {
 pub enum Terminator {
     /// An unconditional jump.
     Goto(BlockId),
-    /// A conditional switch on an integer.
-    ///
-    /// The last element of `targets` is the `else` branch,
-    /// so `targets.len() == values.len() + 1` must always hold.
+    /// A conditional switch on an integer value.
     Switch {
+        /// The value being switched on.
         scrutinee: Value,
-        values: Vec<u64>,
-        targets: Vec<BlockId>,
+        /// Pairs of values and target blocks.
+        targets: Vec<(u64, BlockId)>,
+        /// The fallback block.
+        otherwise: BlockId,
     },
     /// Returning from the current function.
     Return(Value),
@@ -188,24 +195,28 @@ pub enum Terminator {
 /// A statement.
 #[derive(Debug)]
 pub enum Stmt {
-    /// Assignment to a place.
+    /// Evaluate an expression and store it in a place.
     Assign {
         /// The place being assigned to.
         place: Place,
-        /// The value being assigned.
-        value: Value,
+        /// The expression being assigned.
+        expr: Expr,
     },
     /// An expression used as a statement, evaluated purely for side-effects.
     // Expr(ExprId),
     /// A function call.
     Call {
         /// The function being called.
-        func: Value,
+        callee: Value,
         /// The list of arguments being applied.
         args: Vec<Arg>,
         /// Where the result of the function call will be stored.
         dst: Place,
     },
+    /// Drop the contents of a place.
+    Drop(Place),
+    /// TEMPORARY, until we have stdlib + FFI.
+    Print(Value),
 }
 
 /// An argument in a [function call][Stmt::Call]. Either a [`Value`] or a [`Place`].
@@ -220,36 +231,17 @@ pub enum Arg {
 pub enum Expr {
     /// A value used unchanged as an expression.
     Val(Value),
-    /// A literal for a heterogenous aggreggate value (tuple or record).
-    ///
-    /// The two vecs should be the same lengths, forming field type - field value pairs.
-    Construct(Vec<TyId>, Vec<Value>),
     /// An infix operation.
-    Infix {
-        /// The infix operator used.
-        op: InfixOp,
-        /// The left-hand side of the operation.
-        lhs: Value,
-        /// The right-hand side of the operation.
-        rhs: Value,
-    },
+    Infix(InfixOp, Value, Value),
     /// A prefix operation.
-    Prefix {
-        /// The prefix operator used.
-        op: PrefixOp,
-        /// The value the operator is applied to.
-        expr: Value,
-    },
+    Prefix(PrefixOp, Value),
     /// A closure.
     Closure {
         /// The lifted function representing the closure body.
-        func: VarId,
-        /// The captured variables.
-        captures: Vec<VarId>,
+        func: ItemId,
+        /// The captured values.
+        captures: Vec<Value>,
     },
-
-    /// TEMPORARY, until we have stdlib + FFI.
-    Print(Value),
 }
 
 #[derive(Debug)]
@@ -266,15 +258,25 @@ pub enum Value {
     Zst,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Place {
-    pub base: VarId,
+    /// The base variable this place is derived from.
+    pub base: LocalId,
     /// A list of field accesses applied to the base place.
-    /// If this is empty, the place is a local variable.
+    /// If this is empty, the place is directly a local variable.
     pub accesses: Vec<FieldAccess>,
 }
 
-#[derive(Debug)]
+impl Place {
+    pub fn var(var: LocalId) -> Self {
+        Self {
+            base: var,
+            accesses: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct FieldAccess {
     pub index: u32,
     pub ty: TyId,
@@ -294,9 +296,6 @@ pub enum LitValue {
     /// A boolean.
     Bool(bool),
 }
-
-/// A block of statements.
-pub struct BlockExpr(pub Vec<Stmt>);
 
 /// An infix operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,75 +343,4 @@ pub enum PrefixOp {
     Not,
     /// `-`. Numeric negation.
     Neg,
-}
-
-/// An ID representing an interned type. Information about the type can be acquired through [`Hir::ty_kind`].
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TyId(u32);
-
-/// The kinds of types.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Ty {
-    /// 64-bit signed integer.
-    Int,
-    /// 64-bit unsigned integer.
-    UInt,
-    /// 8-bit unsigned integer.
-    Byte,
-    /// Double-precision floating point number (binary64).
-    Float,
-    /// Truth value (`true`/`false`).
-    Bool,
-    /// A collection of heterogenous fields. Tuples and records both get lowered to this.
-    Fields(Vec<TyId>),
-    /// A first-class function value, implemented as a closure.
-    Func(Vec<Param>, TyId),
-}
-
-impl Mir {
-    /// Size of a pointer in bytes. FIXME: Support for non-64 bit architectures?
-    const PTR_SIZE: u32 = 8;
-
-    /// Returns the inline size of the provided type, in bytes.
-    pub fn size_of(&self, ty: TyId) -> u32 {
-        match self.get_ty(ty) {
-            Ty::Int | Ty::UInt | Ty::Float => 8,
-            Ty::Byte | Ty::Bool => 1,
-            Ty::Fields(field_tys) => {
-                let align = self.align_of(ty);
-
-                let base_size = field_tys.iter().fold(0, |sum, &ty| {
-                    let align = self.align_of(ty);
-                    let padding = (align - (sum % align)) % align;
-                    sum + padding + self.size_of(ty)
-                });
-
-                let end_padding = (align - (base_size % align)) % align;
-                base_size + end_padding
-            }
-            Ty::Func(_, _) => Self::PTR_SIZE * 5, // Function, environment, drop, copy, equality.
-        }
-    }
-
-    /// Returns the alignment of this type, in bytes.
-    pub fn align_of(&self, ty: TyId) -> u32 {
-        match self.get_ty(ty) {
-            Ty::Int | Ty::UInt | Ty::Float | Ty::Byte | Ty::Bool => self.size_of(ty),
-            Ty::Fields(field_tys) => field_tys
-                .iter()
-                .map(|&ty| self.align_of(ty))
-                .max()
-                .unwrap_or(1),
-            Ty::Func(_, _) => Self::PTR_SIZE,
-        }
-    }
-}
-
-/// A parameter of a function type.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Param {
-    /// The type of the paremeter.
-    pub ty: TyId,
-    /// Whether the parameter is mutable.
-    pub mutable: bool,
 }

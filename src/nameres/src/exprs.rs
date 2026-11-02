@@ -30,7 +30,7 @@ impl ResolveInfo<'_, '_> {
                 let rhs = self.resolve_expr(rhs);
                 let lhs = self.resolve_expr(lhs)?;
                 match convert_infix_op(*op) {
-                    Some(op) => hir::ExprKind::Infix { op, lhs, rhs: rhs? },
+                    Some(op) => hir::ExprKind::Infix(op, lhs, rhs?),
                     None => {
                         self.assert_is_place(lhs);
                         hir::ExprKind::Assign {
@@ -40,16 +40,15 @@ impl ResolveInfo<'_, '_> {
                     }
                 }
             }
-            ExprKind::Prefix { op, expr } => hir::ExprKind::Prefix {
-                op: convert_prefix_op(*op),
-                expr: self.resolve_expr(expr)?,
-            },
+            ExprKind::Prefix { op, expr } => {
+                hir::ExprKind::Prefix(convert_prefix_op(*op), self.resolve_expr(expr)?)
+            }
             ExprKind::Field { base, field } => hir::ExprKind::Field {
                 base: self.resolve_expr(base)?,
                 field: *field,
             },
             ExprKind::Call { func, args } => {
-                let func = self.resolve_expr(func);
+                let callee = self.resolve_expr(func);
                 let args: Vec<Arg> = args
                     .iter()
                     .map(|arg| {
@@ -79,7 +78,10 @@ impl ResolveInfo<'_, '_> {
                         }
                     })?;
 
-                hir::ExprKind::Call { func: func?, args }
+                hir::ExprKind::Call {
+                    callee: callee?,
+                    args,
+                }
             }
             ExprKind::MethodCall { base, method, args } => {
                 let base = self.resolve_expr(base);

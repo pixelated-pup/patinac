@@ -34,7 +34,7 @@ use inkwell::{
 };
 use slotmap::SecondaryMap;
 
-use irs::mir::{ItemKind, Mir, Param, Ty, VarId};
+use irs::mir::{ItemKind, LocalId, Mir, Param, Ty};
 
 use crate::layout::{IntSize, LayoutValue, ScalarKind, ScalarLayout, StorageClass};
 pub use config::*;
@@ -52,8 +52,8 @@ struct CodegenState<'mir, 'ctx> {
     builder: Builder<'ctx>,
     module: Module<'ctx>,
     target: TargetMachine,
-    funcs: SecondaryMap<VarId, FunctionValue<'ctx>>,
-    vars: SecondaryMap<VarId, LayoutValue<'mir, 'ctx>>,
+    funcs: SecondaryMap<LocalId, FunctionValue<'ctx>>,
+    vars: SecondaryMap<LocalId, LayoutValue<'mir, 'ctx>>,
 }
 
 impl<'mir, 'ctx> CodegenState<'mir, 'ctx> {
