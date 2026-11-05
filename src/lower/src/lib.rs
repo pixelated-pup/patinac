@@ -200,13 +200,6 @@ impl<'ext, 'func> LowerInfo<'ext, 'func> {
         self.drop_stack.insert(local);
     }
 
-    fn stage_drop_value(&mut self, value: &Value) {
-        match value {
-            Value::Copy(place) | Value::Move(place) => self.stage_drop(place.base),
-            Value::Lit(_) | Value::Zst(_) => {}
-        }
-    }
-
     fn unstage_drop(&mut self, local: LocalId) {
         self.drop_stack.remove(&local);
     }
@@ -215,6 +208,10 @@ impl<'ext, 'func> LowerInfo<'ext, 'func> {
         for local in mem::take(&mut self.drop_stack).into_iter().rev() {
             self.add_stmt(mir::Stmt::Drop(Place::local(local)));
         }
+    }
+
+    fn unit(&self) -> Value {
+        Value::Zst(self.ty_ctx.unit())
     }
 
     fn lower_local(&mut self, var: VarId) -> LocalId {

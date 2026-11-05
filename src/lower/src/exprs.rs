@@ -1,11 +1,11 @@
-use std::{iter, range::Range};
+use std::range::Range;
 
 use errors::Report;
 use ident::Ident;
 use irs::{
     hir::{self, ExprId, ExprKind, LitExpr, VarId},
-    mir::{self, FieldAccess, Func, LocalId, Place, Terminator, Value},
-    ty::{Param, Ty, TyId},
+    mir::{self, FieldAccess, Func, Local, LocalId, Place, Terminator, Value},
+    ty::{Ty, TyId},
 };
 
 use crate::LowerInfo;
@@ -55,11 +55,8 @@ impl LowerInfo<'_, '_> {
     pub fn lower_as_value(&mut self, expr_id: ExprId) -> Value {
         let expr = self.hir.expr(expr_id);
         match &expr.kind {
-            ExprKind::Var(var)
-                if let info = self.hir.var_info(*var)
-                    && info.global =>
-            {
-                Value::Zst(info.ty)
+            ExprKind::Var(_) | ExprKind::Field { .. } if self.ty_ctx.is_zst(expr.ty) => {
+                Value::Zst(expr.ty)
             }
             ExprKind::Lit(lit) => Value::Lit(self.lower_lit(lit, expr.span, expr.ty)),
             ExprKind::Assign { place, value } => {
@@ -67,7 +64,7 @@ impl LowerInfo<'_, '_> {
                 assert!(self.func.local(place.base).mutable);
                 self.add_stmt(mir::Stmt::Drop(place.clone()));
                 self.lower_into_place(*value, place);
-                mir::Value::Zst(self.ty_ctx.unit())
+                self.unit()
             }
             ExprKind::For { .. } => todo!("For Loops"),
             ExprKind::Loop(body) => {
@@ -82,16 +79,15 @@ impl LowerInfo<'_, '_> {
                 let merge_block = self.func.add_block();
                 self.block = merge_block;
 
-                Value::Zst(self.ty_ctx.unit())
+                self.unit()
             }
             ExprKind::Break => todo!("Unconditional Control Flow"),
             ExprKind::Continue => todo!("Unconditional Control Flow"),
             ExprKind::Return(_) => todo!("Unconditional Control Flow"),
             ExprKind::Print(expr) => {
-                let value = self.lower_as_value(*expr);
-                self.stage_drop_value(&value);
+                let value = self.lower_as_value(*expr); // NEEDS DROP
                 self.add_stmt(mir::Stmt::Print(value));
-                Value::Zst(self.ty_ctx.unit())
+                self.unit()
             }
 
             ExprKind::Var(_) | ExprKind::Field { .. } => Value::Copy(self.lower_as_place(expr_id)),
@@ -114,10 +110,10 @@ impl LowerInfo<'_, '_> {
     pub fn lower_as_place(&mut self, expr_id: ExprId) -> Place {
         let expr = self.hir.expr(expr_id);
         match &expr.kind {
-            ExprKind::Var(var) if !self.hir.var_info(*var).global => {
+            ExprKind::Var(var) if !self.ty_ctx.is_zst(expr.ty) => {
                 Place::local(self.lower_local(*var))
             }
-            ExprKind::Field { base, field } => {
+            ExprKind::Field { base, field } if !self.ty_ctx.is_zst(expr.ty) => {
                 let Ty::Named { fields, .. } = self.ty_ctx.get(self.hir.expr(*base).ty) else {
                     unreachable!("field access of non-record type")
                 };
@@ -136,6 +132,7 @@ impl LowerInfo<'_, '_> {
             | ExprKind::Tuple(_)
             | ExprKind::Infix(_, _, _)
             | ExprKind::Prefix(_, _)
+            | ExprKind::Field { .. }
             | ExprKind::Call { .. }
             | ExprKind::MethodCall { .. }
             | ExprKind::Lambda { .. }
@@ -162,7 +159,6 @@ impl LowerInfo<'_, '_> {
     ///
     /// This function is guaranteed to only assign to `place` once and to never read from it,
     /// so it can safely be used with a fresh immutable temporary.
-    /// The only exception is if it evaluates to a ZST, in which case `place` may never be assigned.
     pub fn lower_into_place(&mut self, expr_id: ExprId, place: Place) {
         let expr = self.hir.expr(expr_id);
         match &expr.kind {
@@ -211,16 +207,14 @@ impl LowerInfo<'_, '_> {
                 self.block = merge_block;
             }
             ExprKind::Call { callee, args } => {
-                let callee = self.lower_as_value(*callee);
-                self.stage_drop_value(&callee);
+                let callee = self.lower_as_value(*callee); // NEEDS DROP
                 let args = args
                     .iter()
                     .map(|arg| {
                         if arg.mutable {
                             mir::Arg::Place(self.lower_as_place(arg.value))
                         } else {
-                            let value = self.lower_as_value(arg.value);
-                            self.stage_drop_value(&value);
+                            let value = self.lower_as_value(arg.value); // NEEDS DROP
                             mir::Arg::Value(value)
                         }
                     })
@@ -258,8 +252,6 @@ impl LowerInfo<'_, '_> {
 
                         self.block = merge_block;
                     }
-                    // No else branch means the overall expression evaluates to unit,
-                    // so we don't need to write to the destination place
                     None => {
                         self.block = th_block;
                         self.lower_block_expr(th, None);
@@ -333,90 +325,133 @@ impl LowerInfo<'_, '_> {
         &mut self,
         expr: ExprId,
         params: &[VarId],
-        captures: &[(VarId, VarId)],
+        captures: &[VarId],
         body: ExprId,
     ) -> mir::Expr {
         // Create a distinct name for the lifted function.
         let func_name = format!("_{}::closure{}", self.func.ident, self.lambda_counter);
         self.lambda_counter += 1;
 
-        let (captures, rebindings): (Vec<_>, Vec<_>) = captures
-            .iter()
-            .map(|(capture, rebinding)| (self.lower_local(*capture), self.lower_local(*rebinding)))
-            .collect();
-
         // Create a type for the environment.
         let capture_tys = captures
             .iter()
-            .map(|local| self.func.local(*local).ty)
+            .map(|&capture| self.hir.var_info(capture).ty)
             .collect();
         let env_ty = self.ty_ctx.intern(Ty::Tuple(capture_tys));
 
+        // Construct the environment.
+        let env = self.func.add_temp(env_ty);
+        let mut env = Place::local(env);
+        for (index, &capture) in captures.iter().enumerate() {
+            let capture = self.lower_local(capture);
+            let ty = self.func.local(capture).ty;
+            if self.ty_ctx.is_zst(ty) {
+                continue;
+            }
+            env.accesses.push(FieldAccess {
+                index: index.try_into().expect("tuple too large"),
+                ty,
+            });
+            self.add_stmt(mir::Stmt::Assign {
+                place: env.clone(),
+                expr: mir::Expr::Val(Value::Copy(Place::local(capture))),
+            });
+            env.accesses.pop();
+        }
+
+        // let Ty::Func(mut param_tys, ret_ty) = self.ty_ctx.get(self.hir.expr(expr).ty).clone()
+        // else {
+        //     unreachable!("lambda expression with non-function type")
+        // };
+        // param_tys.push(Param {
+        //     ty: env_ty,
+        //     mutable: false,
+        // });
+
+        let mut body_func = Func::new(
+            Ident::new(&func_name),
+            params.len() + 1,
+            self.hir.expr(body).ty,
+        );
+        let mut builder = LowerInfo::new(
+            self.hir,
+            self.ty_ctx,
+            self.handler,
+            self.module,
+            &mut body_func,
+        );
         // Create the variable representing the lifted function.
-        let Ty::Func(mut param_tys, ret_ty) = self.ty_ctx.get(self.hir.expr(expr).ty).clone()
-        else {
-            unreachable!("lambda expression with non-function type")
-        };
-        param_tys.push(Param {
-            ty: env_ty,
-            mutable: false,
-        });
-        let func_var = self.mir.add_var(mir::Local {
-            ident: Ident::new(&func_name),
-            ty: mir::Ty::Func(param_tys, ret_ty),
-            mutable: false,
-        });
+        builder.lift_lambda_body(params, captures, body, env_ty);
 
-        // Add the environment to the parameter list.
-        let env = self.mir.add_var(mir::Local {
-            ident: Ident::new("env"),
-            ty: env_ty,
-            mutable: false,
-        });
-        let param_vars = params
-            .iter()
-            .map(|var| self.lower_local(*var))
-            .chain(iter::once(env))
-            .collect();
-
-        // Create the body, formed by extracting each capture from the environment before executing the original body.
-        let env = self.mir.add_expr(mir::Expr::Var(env));
-        let mut stmts: Vec<_> = rebindings
-            .iter()
-            .enumerate()
-            .map(|(index, var)| {
-                let field = u32::try_from(index).expect("too many captures");
-                let value = self.mir.add_expr(mir::Expr::Field { base: env, field });
-                mir::Stmt::Decl { var: *var, value }
-            })
-            .collect();
-        stmts.push(mir::Stmt::Expr(self.lower_expr(body)));
-        let body = self.mir.add_expr(mir::Expr::Block(mir::BlockExpr(stmts)));
-
-        self.mir.add_item(Func {
-            var: func_var,
-            kind: ItemKind::Func {
-                params: param_vars,
-                body,
-            },
-        });
+        // self.mir.add_item(Func {
+        //     var: func_var,
+        //     kind: ItemKind::Func {
+        //         params: param_vars,
+        //         body,
+        //     },
+        // });
 
         mir::Expr::Closure {
-            body: func_var,
-            captures,
+            body: body_func,
+            env: Value::Move(env),
         }
+    }
+
+    fn lift_lambda_body(
+        &mut self,
+        params: &[VarId],
+        captures: &[VarId],
+        body: ExprId,
+        env_ty: TyId,
+    ) {
+        // Set up function parameters.
+        for &param in params {
+            let info = self.hir.var_info(param);
+            let local = self.func.add_local(Local {
+                ident: Some(info.ident.ident),
+                mutable: info.mutable,
+                ty: info.ty,
+            });
+            self.var_map.insert(param, local);
+        }
+        let env = self.func.add_local(Local {
+            ident: None,
+            mutable: false,
+            ty: env_ty,
+        });
+
+        // Extract each capture from the environment.
+        let mut env = Place::local(env);
+        for (index, &capture) in captures.iter().enumerate() {
+            let capture = self.lower_local(capture);
+            let ty = self.func.local(capture).ty;
+            if self.ty_ctx.is_zst(ty) {
+                continue;
+            }
+            env.accesses.push(FieldAccess {
+                index: index.try_into().expect("tuple too large"),
+                ty,
+            });
+            self.add_stmt(mir::Stmt::Assign {
+                place: Place::local(capture),
+                expr: mir::Expr::Val(Value::Copy(env.clone())),
+            });
+            env.accesses.pop();
+        }
+
+        // Lower the function body and build the function return.
+        let ret_value = self.lower_as_value(body);
+        self.set_term(mir::Terminator::Return(ret_value));
     }
 
     /// Lowers a block expression, storing the result in `place`. If `place` is None, the result is instead dropped.
     ///
     /// This function is guaranteed to assign to `place` exactly once and to never read from it,
     /// so it can safely be used with a fresh immutable temporary.
-    /// The only exception is if it evaluates to a ZST, in which case `place` may never be assigned.
     fn lower_block_expr(&mut self, block: &hir::BlockExpr, place: Option<Place>) {
         let mut locals = Vec::new();
 
         let [stmts @ .., last] = &block.stmts[..] else {
-            // Empty block, nothing to do.
             return;
         };
 

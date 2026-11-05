@@ -158,7 +158,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                     for id in params {
                         let info = self.mir.var(*id);
                         // We don't actually pass ZSTs.
-                        if self.is_zst(info.ty) {
+                        if self.ty_ctx.is_zst(info.ty) {
                             self.vars.insert(*id, LayoutValue::Zst);
                             continue;
                         }
@@ -282,7 +282,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         let mut param_tys: Vec<_> = params
             .iter()
             .filter_map(|p| {
-                if self.is_zst(p.ty) {
+                if self.ty_ctx.is_zst(p.ty) {
                     None // Skip passing ZSTs.
                 } else if p.mutable || self.is_indirect(p.ty) {
                     Some(self.ptr_ty().into()) // Pass stack pointers for mutable parameters or indirect types.
@@ -629,10 +629,6 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
 
     fn is_indirect(&self, ty: TyId) -> bool {
         self.storage_class(ty) == StorageClass::Indirect
-    }
-
-    fn is_zst(&self, ty: TyId) -> bool {
-        self.storage_class(ty) == StorageClass::Zst
     }
 
     fn is_trivial(&self, ty: TyId) -> bool {

@@ -189,8 +189,8 @@ pub enum ExprKind {
     Lambda {
         /// The parameters of the function.
         params: Vec<VarId>,
-        /// List of external capture - local rebinding pairs.
-        captures: Vec<(VarId, VarId)>,
+        /// List of captured varaibles.
+        captures: Vec<VarId>,
         /// The body of the function.
         body: ExprId,
     },
