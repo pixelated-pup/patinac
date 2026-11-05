@@ -14,8 +14,8 @@ use irs::{
     ModuleId,
     hir::{self, DefItem, DefKind, ExprId, Hir, VarId},
     mir::{
-        self, Block, BlockId, FieldAccess, Func, Item, ItemId, Local, LocalId, Mir, Place,
-        Terminator, Value,
+        self, Block, BlockId, FieldAccess, Func, Item, ItemId, ItemKind, Local, LocalId, Mir,
+        Place, Terminator, Value,
     },
     ty::{self, Ty, TyContext, TyId},
 };
@@ -53,17 +53,17 @@ pub fn lower(hir: &Hir, ty_ctx: &TyContext, handler: ErrorHandler<'_>) -> Mir {
 }
 
 fn lower_item(hir: &Hir, ty_ctx: &TyContext, handler: &ErrorHandler<'_>, item: &DefItem) -> Item {
-    match &item.kind {
+    let kind = match &item.kind {
         DefKind::Const(expr) => todo!(),
-        DefKind::Func { params, body } => Item::Func(lower_func(
-            hir,
-            ty_ctx,
-            handler,
-            hir.var_info(item.var).ident.ident,
-            params,
-            *body,
-            item.module,
-        )),
+        DefKind::Func { params, body } => {
+            ItemKind::Func(lower_func(hir, ty_ctx, handler, params, *body, item.module))
+        }
+    };
+    let info = hir.var_info(item.var);
+    Item {
+        ident: info.ident.ident,
+        ty: info.ty,
+        kind,
     }
 }
 
@@ -71,12 +71,11 @@ fn lower_func(
     hir: &Hir,
     ty_ctx: &TyContext,
     handler: &ErrorHandler<'_>,
-    ident: Ident,
     params: &[VarId],
     body: ExprId,
     module: ModuleId,
 ) -> Func {
-    let mut func = Func::new(ident, params.len(), hir.expr(body).ty);
+    let mut func = Func::new(params.len(), hir.expr(body).ty);
 
     // Set up function parameters.
     let mut var_map = SecondaryMap::new();
@@ -112,17 +111,11 @@ fn lower_func(
 }
 
 fn lower_ctor(ty_ctx: &TyContext, ty: TyId) -> Func {
-    let Ty::Named {
-        ident,
-        fields,
-        ctor,
-        ..
-    } = ty_ctx.get(ty)
-    else {
+    let Ty::Named { fields, ctor, .. } = ty_ctx.get(ty) else {
         unreachable!("ICE: Attempted to lower constructor for non-named type")
     };
 
-    let mut func = Func::new(*ident, fields.len(), ty);
+    let mut func = Func::new(fields.len(), ty);
     let entry = func.add_block();
 
     let temp = func.add_temp(ty);
@@ -202,15 +195,5 @@ impl LowerInfo<'_, '_> {
                 local
             }
         }
-    }
-
-    fn lower_global(&mut self, var: VarId) -> ItemId {
-        let info = self.hir.var_info(var);
-        assert!(
-            info.global,
-            "Only variables representing top-level items should be lowered to MIR globals"
-        );
-
-        todo!()
     }
 }

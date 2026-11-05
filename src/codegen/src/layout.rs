@@ -7,101 +7,49 @@ use irs::ty::{Ty, TyId};
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum LayoutValue<'mir, 'ctx> {
-    Scalar(ScalarKind<'ctx>, ScalarLayout<'ctx>),
+    Scalar(BasicValueEnum<'ctx>),
     Fields(&'mir [TyId], PointerValue<'ctx>),
     Closure(FunctionType<'ctx>, PointerValue<'ctx>),
     Zst,
 }
 
 impl<'mir, 'ctx> LayoutValue<'mir, 'ctx> {
-    pub fn int<B: BasicValue<'ctx> + Copy>(size: IntSize, int: B) -> Self {
+    pub fn int<B: BasicValue<'ctx> + Copy>(int: B) -> Self {
         assert!(int.as_basic_value_enum().is_int_value());
-        Self::Scalar(
-            ScalarKind::Int(size),
-            ScalarLayout::Direct(int.as_basic_value_enum()),
-        )
-    }
-
-    pub fn indirect_int<B: BasicValue<'ctx> + Copy>(size: IntSize, int: B) -> Self {
-        Self::Scalar(
-            ScalarKind::Int(size),
-            ScalarLayout::Indirect(int.as_basic_value_enum().into_pointer_value()),
-        )
+        Self::Scalar(int.as_basic_value_enum())
     }
 
     pub fn float<B: BasicValue<'ctx> + Copy>(float: B) -> Self {
         assert!(float.as_basic_value_enum().is_float_value());
-        Self::Scalar(
-            ScalarKind::Float,
-            ScalarLayout::Direct(float.as_basic_value_enum()),
-        )
-    }
-
-    pub fn indirect_float<B: BasicValue<'ctx> + Copy>(float: B) -> Self {
-        Self::Scalar(
-            ScalarKind::Float,
-            ScalarLayout::Indirect(float.as_basic_value_enum().into_pointer_value()),
-        )
-    }
-
-    pub fn func_ptr<B: BasicValue<'ctx> + Copy>(ty: FunctionType<'ctx>, ptr: B) -> Self {
-        Self::Scalar(
-            ScalarKind::FuncPtr(ty),
-            ScalarLayout::Direct(ptr.as_basic_value_enum()),
-        )
-    }
-
-    pub fn indirect_func_ptr<B: BasicValue<'ctx> + Copy>(ty: FunctionType<'ctx>, ptr: B) -> Self {
-        Self::Scalar(
-            ScalarKind::FuncPtr(ty),
-            ScalarLayout::Indirect(ptr.as_basic_value_enum().into_pointer_value()),
-        )
+        Self::Scalar(float.as_basic_value_enum())
     }
 
     pub fn as_value(&self) -> BasicValueEnum<'ctx> {
         match self {
-            Self::Scalar(_, ScalarLayout::Direct(value)) => *value,
-            Self::Scalar(_, ScalarLayout::Indirect(ptr))
-            | Self::Closure(_, ptr)
-            | Self::Fields(_, ptr) => ptr.as_basic_value_enum(),
+            Self::Scalar(value) => *value,
+            Self::Closure(_, ptr) | Self::Fields(_, ptr) => ptr.as_basic_value_enum(),
             Self::Zst => panic!("not a value: {self:?}"),
         }
     }
 
     pub fn as_scalar(&self) -> BasicValueEnum<'ctx> {
-        let Self::Scalar(_, ScalarLayout::Direct(value)) = self else {
-            panic!("not a scalar: {self:?}")
-        };
-        *value
-    }
-
-    pub fn as_int(&self) -> IntValue<'ctx> {
-        let Self::Scalar(ScalarKind::Int(_), ScalarLayout::Direct(int)) = self else {
-            panic!("not an int: {self:?}")
-        };
-        int.into_int_value()
-    }
-
-    pub fn as_float(&self) -> FloatValue<'ctx> {
-        let Self::Scalar(ScalarKind::Float, ScalarLayout::Direct(float)) = self else {
-            panic!("not a float: {self:?}")
-        };
-        float.into_float_value()
-    }
-
-    pub fn as_fields(&self) -> (&'mir [TyId], PointerValue<'ctx>) {
         match self {
-            &Self::Fields(fields, ptr) => (fields, ptr),
-            _ => panic!("not a record: {self:?}"),
+            Self::Scalar(value) => *value,
+            _ => panic!("not a scalar: {self:?}"),
         }
     }
 
-    pub fn as_pointer(&self) -> PointerValue<'ctx> {
+    pub fn as_int(&self) -> IntValue<'ctx> {
         match self {
-            Self::Scalar(_, ScalarLayout::Indirect(ptr))
-            | Self::Closure(_, ptr)
-            | Self::Fields(_, ptr) => *ptr,
-            _ => panic!("not a pointer: {self:?}"),
+            Self::Scalar(value) => value.into_int_value(),
+            _ => panic!("not an int: {self:?}"),
+        }
+    }
+
+    pub fn as_float(&self) -> FloatValue<'ctx> {
+        match self {
+            Self::Scalar(value) => value.into_float_value(),
+            _ => panic!("not a float: {self:?}"),
         }
     }
 
@@ -109,30 +57,14 @@ impl<'mir, 'ctx> LayoutValue<'mir, 'ctx> {
     where
         F: FnOnce(IntValue<'ctx>, IntValue<'ctx>) -> IntValue<'ctx>,
     {
-        let Self::Scalar(ScalarKind::Int(size), ScalarLayout::Direct(lhs)) = lhs else {
-            panic!("not an int: {lhs:?}")
-        };
-        Self::int(size, op(lhs.into_int_value(), rhs.as_int()))
+        Self::int(op(lhs.as_int(), rhs.as_int()))
     }
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
-pub enum ScalarLayout<'ctx> {
-    Direct(BasicValueEnum<'ctx>),
-    Indirect(PointerValue<'ctx>),
-}
-
-#[derive(PartialEq, Eq, Debug, Clone, Copy)]
-pub enum ScalarKind<'ctx> {
-    Int(IntSize),
+pub enum ScalarKind {
+    Int,
     Float,
-    FuncPtr(FunctionType<'ctx>),
-}
-
-#[derive(PartialEq, Eq, Debug, Clone, Copy)]
-pub enum IntSize {
-    Bits8,
-    Bits64,
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]

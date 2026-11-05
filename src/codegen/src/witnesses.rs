@@ -4,7 +4,7 @@ use inkwell::{
     values::{BasicValue as _, FunctionValue},
 };
 
-use irs::mir::{Ty, LocalId};
+use irs::mir::{LocalId, Ty};
 
 use crate::{CodegenState, layout};
 
@@ -95,7 +95,7 @@ impl<'ctx> CodegenState<'_, 'ctx> {
                     .build_struct_gep(ty, src, idx, "srcfieldptr")
                     .unwrap();
 
-                self.build_copy(self.layout_direct(field_ty, src), dst);
+                self.build_copy_to(self.layout_direct(field_ty, src), dst);
             }
         }
         self.builder.build_return(None).unwrap();
@@ -722,7 +722,7 @@ impl<'ctx> CodegenState<'_, 'ctx> {
                         .builder
                         .build_struct_gep(env_ty, src_env, idx, "srccapture")
                         .unwrap();
-                    self.build_copy(self.layout_direct(ty, src_capture), dst_capture);
+                    self.build_copy_to(self.layout_direct(ty, src_capture), dst_capture);
                 }
             }
 

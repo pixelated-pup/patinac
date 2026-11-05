@@ -4,7 +4,7 @@ use slotmap::{SlotMap, new_key_type};
 
 use ident::Ident;
 
-use crate::ty::{TyContext, TyId};
+use crate::ty::TyId;
 
 /// The mid-level intermediate representation of Patina.
 ///
@@ -25,13 +25,18 @@ pub struct Mir {
 
 impl Mir {
     /// Returns an iterator over all of the items.
-    pub fn items(&self) -> impl Iterator<Item = (ItemId, &Item)> {
-        self.items.iter()
+    pub fn items(&self) -> impl Iterator<Item = &Item> {
+        self.items.values()
     }
 
     /// Adds an item, returning a unique ID for it.
     pub fn add_item(&mut self, item: Item) -> ItemId {
         self.items.insert(item)
+    }
+
+    /// Returns the information for the given item.
+    pub fn item(&self, id: ItemId) -> &Item {
+        &self.items[id]
     }
 
     /// Returns the main function, if it exists.
@@ -56,7 +61,17 @@ new_key_type! {
 /// known as "definition items" in earlier IRs.
 /// Methods have also been fully desugared into regular functions.
 #[derive(Debug)]
-pub enum Item {
+pub struct Item {
+    /// The user-defined name of the item.
+    pub ident: Ident,
+    /// The type of the item.
+    pub ty: TyId,
+    /// The kind of item.
+    pub kind: ItemKind,
+}
+
+#[derive(Debug)]
+pub enum ItemKind {
     /// A constant item.
     ///
     /// The definition of constant used here is more specific than a source-language constant: These are specifically constants with literal values.
@@ -69,8 +84,6 @@ pub enum Item {
 /// A function item.
 #[derive(Debug)]
 pub struct Func {
-    /// The user-defined name of the function.
-    pub ident: Ident,
     /// The number of parameters that the function has.
     pub param_count: usize,
     /// The return type of the function.
@@ -85,9 +98,8 @@ pub struct Func {
 }
 
 impl Func {
-    pub fn new(ident: Ident, param_count: usize, ret_ty: TyId) -> Self {
+    pub fn new(param_count: usize, ret_ty: TyId) -> Self {
         Self {
-            ident,
             param_count,
             ret_ty,
             locals: SlotMap::default(),
@@ -239,13 +251,13 @@ pub enum Expr {
     /// A closure.
     Closure {
         /// The lifted function representing the closure body.
-        func: ItemId,
-        /// The captured values.
-        captures: Vec<Value>,
+        body: ItemId,
+        /// The environment, containing the captured values.
+        env: Value,
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Value {
     /// A copy from a place. This is the default way of reading from a place.
     Copy(Place),
@@ -255,7 +267,7 @@ pub enum Value {
     Move(Place),
     /// A scalar literal value. The specific kinds of literals are represented by [`LitValue`].
     Lit(LitValue),
-    Item(ItemId),
+    /// A ZST value of the given type.
     Zst(TyId),
 }
 
@@ -301,39 +313,16 @@ pub enum LitValue {
 /// An infix operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InfixOp {
-    /// `+`.
     Add,
-    /// TEMPORARY, until we have traits. `+.`.
-    AddF,
-    /// `-`.
     Sub,
-    /// TEMPORARY, until we have traits. `-.`.
-    SubF,
-    /// `*`.
     Mul,
-    /// TEMPORARY, until we have traits. `*.`.
-    MulF,
-    /// `/`.
     Div,
-    /// TEMPORARY, until we have traits. `/.`.
-    DivF,
-    /// `^`.
     Exp,
-    /// `&&`.
-    And,
-    /// `||`.
-    Or,
-    /// `==`.
     Eqq,
-    /// `!=`.
     Neq,
-    /// `>`.
     Gt,
-    /// `<`.
     Lt,
-    /// `>=`.
     Geq,
-    /// `<=`.
     Leq,
 }
 

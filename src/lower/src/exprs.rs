@@ -14,13 +14,17 @@ impl LowerInfo<'_, '_> {
     /// Caller's responsibility to ensure the result of the expression is dropped.
     pub fn lower_as_expr(&mut self, expr_id: ExprId) -> mir::Expr {
         match &self.hir.expr(expr_id).kind {
-            &ExprKind::Infix(op, lhs, rhs) => mir::Expr::Infix(
-                convert_infix_op(op),
-                self.lower_as_value(lhs),
-                self.lower_as_value(rhs),
-            ),
-            &ExprKind::Prefix(op, arg) => {
-                mir::Expr::Prefix(convert_prefix_op(op), self.lower_as_value(arg))
+            ExprKind::Infix(op, lhs, rhs)
+                if !matches!(op, hir::InfixOp::And | hir::InfixOp::Or) =>
+            {
+                mir::Expr::Infix(
+                    convert_infix_op(*op).unwrap(),
+                    self.lower_as_value(*lhs),
+                    self.lower_as_value(*rhs),
+                )
+            }
+            ExprKind::Prefix(op, arg) => {
+                mir::Expr::Prefix(convert_prefix_op(*op), self.lower_as_value(*arg))
             }
             ExprKind::Lambda {
                 params,
@@ -31,6 +35,7 @@ impl LowerInfo<'_, '_> {
             ExprKind::Var(_)
             | ExprKind::Lit(_)
             | ExprKind::Tuple(_)
+            | ExprKind::Infix(_, _, _)
             | ExprKind::Field { .. }
             | ExprKind::Call { .. }
             | ExprKind::MethodCall { .. }
@@ -50,7 +55,8 @@ impl LowerInfo<'_, '_> {
         let expr = self.hir.expr(expr_id);
         match &expr.kind {
             ExprKind::Var(var) if self.hir.var_info(*var).global => {
-                Value::Item(self.lower_global(*var))
+                todo!("Function type stuff")
+                //Value::Zst(self.lower_global(*var))
             }
             ExprKind::Lit(lit) => Value::Lit(self.lower_lit(lit, expr.span, expr.ty)),
             ExprKind::Assign { place, value } => {
@@ -58,7 +64,7 @@ impl LowerInfo<'_, '_> {
                 assert!(self.func.local(place.base).mutable);
                 self.add_stmt(mir::Stmt::Drop(place.clone()));
                 self.lower_into_place(*value, place);
-                mir::Value::Zst(self.ty_ctx.unit());
+                mir::Value::Zst(self.ty_ctx.unit())
             }
             ExprKind::For { .. } => todo!("For Loops"),
             ExprKind::Loop(body) => {
@@ -73,7 +79,7 @@ impl LowerInfo<'_, '_> {
                 let merge_block = self.func.add_block();
                 self.block = merge_block;
 
-                Value::Zst
+                Value::Zst(self.ty_ctx.unit())
             }
             ExprKind::Break => todo!("Unconditional Control Flow"),
             ExprKind::Continue => todo!("Unconditional Control Flow"),
@@ -81,7 +87,7 @@ impl LowerInfo<'_, '_> {
             ExprKind::Print(expr) => {
                 let value = self.lower_as_value(*expr); // NEEDS DROP
                 self.add_stmt(mir::Stmt::Print(value));
-                Value::Zst
+                Value::Zst(self.ty_ctx.unit())
             }
 
             ExprKind::Var(_) | ExprKind::Field { .. } => Value::Copy(self.lower_as_place(expr_id)),
@@ -167,6 +173,38 @@ impl LowerInfo<'_, '_> {
                     self.lower_into_place(*elem, place.clone());
                     place.accesses.pop();
                 }
+            }
+            ExprKind::Infix(op, lhs, rhs) if matches!(op, hir::InfixOp::And | hir::InfixOp::Or) => {
+                let lhs = self.lower_as_value(*lhs);
+
+                let th_block = self.func.add_block();
+                let el_block = self.func.add_block();
+                let merge_block = self.func.add_block();
+
+                self.set_term(Terminator::Switch {
+                    scrutinee: lhs.clone(),
+                    targets: vec![(1, th_block)],
+                    otherwise: el_block,
+                });
+
+                let (done_block, cont_block) = match op {
+                    hir::InfixOp::And => (el_block, th_block),
+                    hir::InfixOp::Or => (th_block, el_block),
+                    _ => unreachable!(),
+                };
+
+                self.block = done_block;
+                self.add_stmt(mir::Stmt::Assign {
+                    place: place.clone(),
+                    expr: mir::Expr::Val(lhs),
+                });
+                self.set_term(Terminator::Goto(merge_block));
+
+                self.block = cont_block;
+                self.lower_into_place(*rhs, place);
+                self.set_term(Terminator::Goto(merge_block));
+
+                self.block = merge_block;
             }
             ExprKind::Call { callee, args } => {
                 let callee = self.lower_as_value(*callee); // NEEDS DROP
@@ -284,6 +322,8 @@ impl LowerInfo<'_, '_> {
         }
     }
 
+    //fn lower_infix(&self, op: hir::InfixOp, lhs: ExprId, rhs: ExprId) -> mir::
+
     fn lower_lambda(
         &mut self,
         expr: ExprId,
@@ -357,7 +397,7 @@ impl LowerInfo<'_, '_> {
         });
 
         mir::Expr::Closure {
-            func: func_var,
+            body: func_var,
             captures,
         }
     }
@@ -416,21 +456,31 @@ impl LowerInfo<'_, '_> {
     }
 }
 
-macro_rules! convert_op {
-    ($op:ident, $enum_name:ident, $($variant:ident),*) => {
-        match $op {
-            $(hir::$enum_name::$variant => mir::$enum_name::$variant),*
-        }
-    };
-}
-
 const fn convert_prefix_op(op: hir::PrefixOp) -> mir::PrefixOp {
-    convert_op!(op, PrefixOp, Not, Neg)
+    match op {
+        hir::PrefixOp::Not => mir::PrefixOp::Not,
+        hir::PrefixOp::Neg => mir::PrefixOp::Neg,
+    }
 }
 
-const fn convert_infix_op(op: hir::InfixOp) -> mir::InfixOp {
-    convert_op!(
-        op, InfixOp, Add, AddF, Sub, SubF, Mul, MulF, Div, DivF, Exp, And, Or, Eqq, Neq, Gt, Lt,
-        Geq, Leq
-    )
+const fn convert_infix_op(op: hir::InfixOp) -> Option<mir::InfixOp> {
+    match op {
+        hir::InfixOp::Add => Some(mir::InfixOp::Add),
+        hir::InfixOp::AddF => Some(mir::InfixOp::AddF),
+        hir::InfixOp::Sub => Some(mir::InfixOp::Sub),
+        hir::InfixOp::SubF => Some(mir::InfixOp::SubF),
+        hir::InfixOp::Mul => Some(mir::InfixOp::Mul),
+        hir::InfixOp::MulF => Some(mir::InfixOp::MulF),
+        hir::InfixOp::Div => Some(mir::InfixOp::Div),
+        hir::InfixOp::DivF => Some(mir::InfixOp::DivF),
+        hir::InfixOp::Exp => Some(mir::InfixOp::Exp),
+        hir::InfixOp::And => None,
+        hir::InfixOp::Or => None,
+        hir::InfixOp::Eqq => Some(mir::InfixOp::Eqq),
+        hir::InfixOp::Neq => Some(mir::InfixOp::Neq),
+        hir::InfixOp::Gt => Some(mir::InfixOp::Gt),
+        hir::InfixOp::Lt => Some(mir::InfixOp::Lt),
+        hir::InfixOp::Geq => Some(mir::InfixOp::Geq),
+        hir::InfixOp::Leq => Some(mir::InfixOp::Leq),
+    }
 }

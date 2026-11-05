@@ -29,24 +29,32 @@ use inkwell::{
     },
     types::{BasicType, BasicTypeEnum, FunctionType},
     values::{
-        BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue,
+        BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue,
+        PointerValue,
     },
 };
 use slotmap::SecondaryMap;
 
 use irs::{
-    mir::{ItemKind, LocalId, Mir, Param, Ty},
-    ty::TyContext,
+    mir::{ItemKind, LocalId, Mir},
+    ty::{Param, Ty, TyContext, TyId},
 };
 
-use crate::layout::{IntSize, LayoutValue, ScalarKind, ScalarLayout, StorageClass};
+use crate::layout::{LayoutValue, StorageClass};
 pub use config::*;
 
 /// # Panics
 /// Will panic if `target` is not a valid LLVM target triple.
-pub fn emit(mir: &Mir, opt_level: OptLevel, mode: CodegenMode, target: Target, package_name: &str) {
+pub fn emit(
+    mir: &Mir,
+    ty_ctx: &TyContext,
+    opt_level: OptLevel,
+    mode: CodegenMode,
+    target: Target,
+    package_name: &str,
+) {
     let ctx = Context::create();
-    CodegenState::new(mir, &ctx, target, package_name).emit(opt_level, mode);
+    CodegenState::new(mir, ty_ctx, &ctx, target, package_name).emit(opt_level, mode);
 }
 
 struct CodegenState<'mir, 'ty_ctx, 'ctx> {
@@ -57,7 +65,7 @@ struct CodegenState<'mir, 'ty_ctx, 'ctx> {
     module: Module<'ctx>,
     target: TargetMachine,
     funcs: SecondaryMap<LocalId, FunctionValue<'ctx>>,
-    vars: SecondaryMap<LocalId, LayoutValue<'mir, 'ctx>>,
+    vars: SecondaryMap<LocalId, PointerValue<'ctx>>,
 }
 
 impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
@@ -96,59 +104,59 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     /// # Panics
     /// Panics if any functions are invalid, or if writing to the output file fails.
     fn emit(&mut self, opt_level: OptLevel, mode: CodegenMode) {
-        for exec in self.mir.items() {
-            match &exec.kind {
+        for item in self.mir.items() {
+            match &item.kind {
                 ItemKind::Const { .. } => todo!("Constants"),
                 ItemKind::Func { .. } => {
-                    let Ty::Func(params, ret_ty) = &self.mir.var(exec.var).ty else {
+                    let Ty::Func(params, ret_ty) = &self.mir.var(item.var).ty else {
                         unreachable!("ICE")
                     };
-                    let name = Self::mangle_name(self.mir.var(exec.var).ident.to_string());
+                    let name = Self::mangle_name(self.mir.var(item.var).ident.to_string());
                     let func_ty = self.func_ty(params, ret_ty, false);
                     let func = self.add_func(&name, func_ty, false);
-                    self.funcs.insert(exec.var, func);
+                    self.funcs.insert(item.var, func);
                     self.vars.insert(
-                        exec.var,
+                        item.var,
                         LayoutValue::func_ptr(func_ty, func.as_global_value().as_pointer_value()),
                     );
                 }
             }
         }
 
-        if let Some(main) = self.mir.main() {
-            let ty = self.ctx.i32_type().fn_type(&[], false);
-            let func = self.add_func("main", ty, true);
-            self.funcs.insert(main.var, func);
+        // if let Some(main) = self.mir.main() {
+        //     let ty = self.ctx.i32_type().fn_type(&[], false);
+        //     let func = self.add_func("main", ty, true);
+        //     self.funcs.insert(main.var, func);
 
-            let ItemKind::Func { body, .. } = main.kind else {
-                unreachable!("ICE")
-            };
+        //     let ItemKind::Func { body, .. } = main.kind else {
+        //         unreachable!("ICE")
+        //     };
 
-            let entry_block = self.ctx.append_basic_block(func, "entry");
-            self.builder.position_at_end(entry_block);
-            let _ = self.emit_expr(body);
-            self.builder
-                .build_return(Some(&self.ctx.i32_type().const_zero()))
-                .unwrap();
+        //     let entry_block = self.ctx.append_basic_block(func, "entry");
+        //     self.builder.position_at_end(entry_block);
+        //     let _ = self.emit_expr(body);
+        //     self.builder
+        //         .build_return(Some(&self.ctx.i32_type().const_zero()))
+        //         .unwrap();
 
-            assert!(func.verify(true));
-        }
+        //     assert!(func.verify(true));
+        // }
 
-        for exec in self.mir.items() {
-            match &exec.kind {
+        for item in self.mir.items() {
+            match &item.kind {
                 ItemKind::Const { .. } => todo!("Constants"),
-                ItemKind::Func { params, body } => {
-                    let Ty::Func(_, ret_ty) = &self.mir.var(exec.var).ty else {
+                ItemKind::Func(func) => {
+                    let Ty::Func(_, ret_ty) = &self.mir.var(item.var).ty else {
                         unreachable!("ICE")
                     };
-                    let func = self.funcs[exec.var];
+                    let llvm_func = self.funcs[item.var];
 
                     let entry_block = self.ctx.append_basic_block(func, "entry");
                     self.builder.position_at_end(entry_block);
 
                     // Skip the first argument if it's an out-pointer.
                     let offset = if layout::indirect(ret_ty) { 1 } else { 0 };
-                    let mut args = func.get_param_iter().skip(offset);
+                    let mut args = llvm_func.get_param_iter().skip(offset);
                     for id in params {
                         let info = self.mir.var(*id);
                         // We don't actually pass ZSTs.
@@ -165,26 +173,14 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                         self.vars.insert(*id, value);
                     }
 
-                    let body = self.emit_expr(*body);
-
-                    match layout::storage_class(ret_ty) {
-                        StorageClass::Zst => self.builder.build_return(None).unwrap(),
-                        StorageClass::Indirect => {
-                            let out_ptr = func.get_first_param().unwrap().into_pointer_value();
-                            self.build_move(body, out_ptr);
-                            self.builder.build_return(None).unwrap()
-                        }
-                        StorageClass::Scalar => {
-                            self.builder.build_return(Some(&body.as_scalar())).unwrap()
-                        }
-                    };
+                    self.emit_blocks(func);
 
                     // Clear the parameters to keep the variable map small.
                     for id in params {
                         self.vars.remove(*id);
                     }
 
-                    assert!(func.verify(true));
+                    assert!(llvm_func.verify(true));
                 }
             }
         }
@@ -263,8 +259,8 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         call.try_as_basic_value().basic()
     }
 
-    fn lower_ty(&self, ty: &Ty) -> BasicTypeEnum<'ctx> {
-        let lowered_ty = match ty {
+    fn lower_ty(&self, ty: TyId) -> BasicTypeEnum<'ctx> {
+        let lowered_ty = match self.ty_ctx.get(ty) {
             Ty::Int | Ty::UInt => self.ctx.i64_type().as_basic_type_enum(),
             Ty::Byte => self.ctx.i8_type().as_basic_type_enum(),
             Ty::Float => self.ctx.f64_type().as_basic_type_enum(),
@@ -276,19 +272,19 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
 
         assert_eq!(
             self.target.get_target_data().get_store_size(&lowered_ty),
-            ty.size().into(),
+            self.ty_ctx.size_of(ty).into(),
             "ty: {ty:?}"
         );
         assert_eq!(
-            u64::from(self.target.get_target_data().get_abi_alignment(&lowered_ty)),
-            ty.alignment().into(),
+            self.target.get_target_data().get_abi_alignment(&lowered_ty),
+            self.ty_ctx.align_of(ty),
             "ty: {ty:?}"
         );
 
         lowered_ty
     }
 
-    fn func_ty(&self, params: &[Param], ret_ty: &Ty, env: bool) -> FunctionType<'ctx> {
+    fn func_ty(&self, params: &[Param], ret_ty: TyId, env: bool) -> FunctionType<'ctx> {
         let mut param_tys: Vec<_> = params
             .iter()
             .filter_map(|p| {
@@ -308,7 +304,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
 
         // Add parameter for return out-pointer if needed.
-        match layout::storage_class(ret_ty) {
+        match layout::storage_class(self.ty_ctx.get(ret_ty)) {
             StorageClass::Zst => self.ctx.void_type().fn_type(&param_tys, false),
             StorageClass::Indirect => {
                 param_tys.insert(0, self.ptr_ty().into());
@@ -342,8 +338,8 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         ty.as_basic_type_enum()
     }
 
-    fn fields_ty(&self, fields: &[Ty]) -> BasicTypeEnum<'ctx> {
-        let field_tys: Vec<_> = fields.iter().map(|ty| self.lower_ty(ty)).collect();
+    fn fields_ty(&self, fields: &[TyId]) -> BasicTypeEnum<'ctx> {
+        let field_tys: Vec<_> = fields.iter().map(|ty| self.lower_ty(*ty)).collect();
         self.ctx.struct_type(&field_tys, false).as_basic_type_enum()
     }
 
@@ -380,35 +376,46 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         self.ctx.ptr_type(AddressSpace::default()).const_null()
     }
 
-    fn layout(&self, ty: &'mir Ty, value: BasicValueEnum<'ctx>) -> LayoutValue<'mir, 'ctx> {
-        match ty {
-            Ty::Int | Ty::UInt => LayoutValue::int(IntSize::Bits64, value),
-            Ty::Byte | Ty::Bool => LayoutValue::int(IntSize::Bits8, value),
+    fn layout(&self, ty: TyId, value: BasicValueEnum<'ctx>) -> LayoutValue<'mir, 'ctx> {
+        match self.ty_ctx.get(ty) {
+            Ty::Int | Ty::UInt => LayoutValue::int(value),
+            Ty::Byte | Ty::Bool => LayoutValue::int(value),
             Ty::Float => LayoutValue::float(value),
             // FIXME: Account for non-capturing functions.
             Ty::Func(params, ret_ty) => LayoutValue::Closure(
-                self.func_ty(params, ret_ty, true),
+                self.func_ty(params, *ret_ty, true),
                 value.into_pointer_value(),
             ),
             Ty::Fields(fields) => LayoutValue::Fields(fields, value.into_pointer_value()),
         }
     }
 
-    fn layout_direct(&self, ty: &'mir Ty, ptr: PointerValue<'ctx>) -> LayoutValue<'mir, 'ctx> {
-        match ty {
+    fn layout_indirect(&self, ty: TyId, ptr: PointerValue<'ctx>) -> LayoutValue<'mir, 'ctx> {
+        match self.ty_ctx.get(ty) {
+            // FIXME: Account for non-capturing functions.
+            Ty::Func(params, ret_ty) => {
+                LayoutValue::Closure(self.func_ty(params, *ret_ty, true), ptr)
+            }
+            Ty::Fields(fields) => LayoutValue::Fields(fields, ptr),
+            _ => panic!(),
+        }
+    }
+
+    fn layout_direct(&self, ty: TyId, ptr: PointerValue<'ctx>) -> LayoutValue<'mir, 'ctx> {
+        match self.ty_ctx.get(ty) {
             Ty::Int | Ty::UInt => {
                 let int = self
                     .builder
                     .build_load(self.ctx.i64_type(), ptr, "")
                     .unwrap();
-                LayoutValue::int(IntSize::Bits64, int)
+                LayoutValue::int(int)
             }
             Ty::Byte | Ty::Bool => {
                 let int = self
                     .builder
                     .build_load(self.ctx.i8_type(), ptr, "")
                     .unwrap();
-                LayoutValue::int(IntSize::Bits8, int)
+                LayoutValue::int(int)
             }
             Ty::Float => {
                 let float = self
@@ -417,19 +424,6 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                     .unwrap();
                 LayoutValue::float(float)
             }
-            // FIXME: Account for non-capturing functions.
-            Ty::Func(params, ret_ty) => {
-                LayoutValue::Closure(self.func_ty(params, ret_ty, true), ptr)
-            }
-            Ty::Fields(fields) => LayoutValue::Fields(fields, ptr),
-        }
-    }
-
-    fn layout_indirect(&self, ty: &'mir Ty, ptr: PointerValue<'ctx>) -> LayoutValue<'mir, 'ctx> {
-        match ty {
-            Ty::Int | Ty::UInt => LayoutValue::indirect_int(IntSize::Bits64, ptr),
-            Ty::Byte | Ty::Bool => LayoutValue::indirect_int(IntSize::Bits8, ptr),
-            Ty::Float => LayoutValue::indirect_float(ptr),
             // FIXME: Account for non-capturing functions.
             Ty::Func(params, ret_ty) => {
                 LayoutValue::Closure(self.func_ty(params, ret_ty, true), ptr)
@@ -460,141 +454,112 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         alloc
     }
 
-    fn build_drop(&self, value: LayoutValue<'mir, 'ctx>) {
-        match value {
-            LayoutValue::Scalar(
-                ScalarKind::Int(_) | ScalarKind::Float | ScalarKind::FuncPtr(_),
-                _,
-            )
-            | LayoutValue::Zst => (), // Trivial types
-            LayoutValue::Closure(_, ptr) => {
-                self.build_call(self.any_closure_drop(), &[ptr.into()]);
+    fn build_drop(&self, ty: TyId, place: PointerValue<'ctx>) {
+        match self.ty_ctx.get(ty) {
+            // Trivial types.
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => {}
+            Ty::Tuple(elem_tys) => {
+                self.build_call(self.fields_drop(elem_tys), &[place.into()]);
             }
-            LayoutValue::Fields(fields, ptr) => {
-                self.build_call(self.fields_drop(fields), &[ptr.into()]);
+            Ty::Func(params, ret_ty) => {
+                self.build_call(self.any_closure_drop(), &[place.into()]);
             }
+            Ty::Named {
+                ident,
+                opaque,
+                fields,
+                ctor,
+                module,
+            } => todo!(),
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }
 
-    fn build_dup(&self, value: LayoutValue<'mir, 'ctx>) -> LayoutValue<'mir, 'ctx> {
-        match value {
-            LayoutValue::Scalar(
-                ScalarKind::Int(_) | ScalarKind::Float | ScalarKind::FuncPtr(_),
-                ScalarLayout::Direct(_),
-            ) => value, // Trivial types
-            LayoutValue::Scalar(ScalarKind::Int(size), ScalarLayout::Indirect(ptr)) => {
-                let ty = match size {
-                    IntSize::Bits8 => self.ctx.i8_type(),
-                    IntSize::Bits64 => self.ctx.i64_type(),
-                };
-                LayoutValue::int(size, self.builder.build_load(ty, ptr, "").unwrap())
+    fn build_copy(&self, ty: TyId, place: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
+        match self.ty_ctx.get(ty) {
+            Ty::Int | Ty::UInt => self
+                .builder
+                .build_load(self.ctx.i64_type(), place, "")
+                .unwrap(),
+            Ty::Byte | Ty::Bool => self
+                .builder
+                .build_load(self.ctx.i8_type(), place, "")
+                .unwrap(),
+            Ty::Float => self
+                .builder
+                .build_load(self.ctx.f64_type(), place, "")
+                .unwrap(),
+            Ty::Tuple(_) | Ty::Func(_, _) | Ty::Named { .. } => {
+                let new_ptr = self.build_alloca_entry(self.lower_ty(ty), "");
+                self.build_copy_to(ty, place, new_ptr);
+                new_ptr.as_basic_value_enum()
             }
-            LayoutValue::Scalar(ScalarKind::Float, ScalarLayout::Indirect(ptr)) => {
-                LayoutValue::float(
-                    self.builder
-                        .build_load(self.ctx.f64_type(), ptr, "")
-                        .unwrap(),
-                )
-            }
-            LayoutValue::Scalar(ScalarKind::FuncPtr(func_ty), ScalarLayout::Indirect(ptr)) => {
-                LayoutValue::func_ptr(
-                    func_ty,
-                    self.builder.build_load(self.ptr_ty(), ptr, "").unwrap(),
-                )
-            }
-            LayoutValue::Closure(func_ty, ptr) => {
-                let new_ptr = self.build_alloca_entry(self.closure_ty(), "");
-                self.build_call(self.any_closure_copy(), &[new_ptr.into(), ptr.into()]);
-                LayoutValue::Closure(func_ty, new_ptr)
-            }
-            LayoutValue::Fields(fields, ptr) => {
-                let new_ptr = self.build_alloca_entry(self.fields_ty(fields), "");
-                self.build_call(self.fields_copy(fields), &[new_ptr.into(), ptr.into()]);
-                LayoutValue::Fields(fields, new_ptr)
-            }
-            LayoutValue::Zst => LayoutValue::Zst,
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }
 
-    fn build_copy(&self, value: LayoutValue<'mir, 'ctx>, dst: PointerValue<'ctx>) {
-        match value {
-            LayoutValue::Scalar(
-                ScalarKind::Int(_) | ScalarKind::Float | ScalarKind::FuncPtr(_),
-                ScalarLayout::Direct(value),
-            ) => {
+    fn build_copy_to(&self, ty: TyId, src: PointerValue<'ctx>, dst: PointerValue<'ctx>) {
+        match self.ty_ctx.get(ty) {
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Bool | Ty::Float => {
+                let value = self.build_copy(ty, src);
+                self.build_store(ty, value, dst);
+            }
+            Ty::Tuple(elem_tys) => {
+                self.build_call(self.fields_copy(elem_tys), &[dst.into(), src.into()]);
+            }
+            Ty::Func(params, ret_ty) => {
+                self.build_call(self.any_closure_copy(), &[dst.into(), src.into()]);
+            }
+            Ty::Named {
+                ident,
+                opaque,
+                fields,
+                ctor,
+                module,
+            } => todo!(),
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
+        }
+    }
+
+    fn build_move(&self, ty: TyId, place: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
+        match self.ty_ctx.get(ty) {
+            Ty::Int | Ty::UInt => self
+                .builder
+                .build_load(self.ctx.i64_type(), place, "")
+                .unwrap(),
+            Ty::Byte | Ty::Bool => self
+                .builder
+                .build_load(self.ctx.i8_type(), place, "")
+                .unwrap(),
+            Ty::Float => self
+                .builder
+                .build_load(self.ctx.f64_type(), place, "")
+                .unwrap(),
+            Ty::Tuple(_) | Ty::Func(_, _) | Ty::Named { .. } => place.as_basic_value_enum(),
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
+        }
+    }
+
+    fn build_store(&self, ty: TyId, value: BasicValueEnum<'ctx>, dst: PointerValue<'ctx>) {
+        match self.ty_ctx.get(ty) {
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => {
                 self.builder.build_store(dst, value).unwrap();
             }
-            LayoutValue::Scalar(ScalarKind::Int(size), ScalarLayout::Indirect(ptr)) => {
-                let ty = match size {
-                    IntSize::Bits8 => self.ctx.i8_type(),
-                    IntSize::Bits64 => self.ctx.i64_type(),
-                };
-                let int = self.builder.build_load(ty, ptr, "").unwrap();
-                self.builder.build_store(dst, int).unwrap();
+            Ty::Tuple(_) | Ty::Func(_, _) | Ty::Named { .. } => {
+                self.build_memcpy(dst, value.into_pointer_value(), &self.lower_ty(ty))
             }
-            LayoutValue::Scalar(ScalarKind::Float, ScalarLayout::Indirect(ptr)) => {
-                let float = self
-                    .builder
-                    .build_load(self.ctx.f64_type(), ptr, "")
-                    .unwrap();
-                self.builder.build_store(dst, float).unwrap();
-            }
-            LayoutValue::Scalar(ScalarKind::FuncPtr(_), ScalarLayout::Indirect(ptr)) => {
-                let func = self.builder.build_load(self.ptr_ty(), ptr, "").unwrap();
-                self.builder.build_store(dst, func).unwrap();
-            }
-            LayoutValue::Closure(_, ptr) => {
-                self.build_call(self.any_closure_copy(), &[dst.into(), ptr.into()]);
-            }
-            LayoutValue::Fields(fields, ptr) => {
-                self.build_call(self.fields_copy(fields), &[dst.into(), ptr.into()]);
-            }
-            LayoutValue::Zst => {}
-        }
-    }
-
-    fn build_move(&self, value: LayoutValue<'mir, 'ctx>, dst: PointerValue<'ctx>) {
-        match value {
-            LayoutValue::Scalar(_, ScalarLayout::Direct(value)) => {
-                self.builder.build_store(dst, value).unwrap();
-            }
-            LayoutValue::Scalar(ScalarKind::Int(size), ScalarLayout::Indirect(ptr)) => {
-                let ty = match size {
-                    IntSize::Bits8 => self.ctx.i8_type(),
-                    IntSize::Bits64 => self.ctx.i64_type(),
-                };
-                let int = self.builder.build_load(ty, ptr, "").unwrap();
-                self.builder.build_store(dst, int).unwrap();
-            }
-            LayoutValue::Scalar(ScalarKind::Float, ScalarLayout::Indirect(ptr)) => {
-                let float = self
-                    .builder
-                    .build_load(self.ctx.f64_type(), ptr, "")
-                    .unwrap();
-                self.builder.build_store(dst, float).unwrap();
-            }
-            LayoutValue::Scalar(ScalarKind::FuncPtr(_), ScalarLayout::Indirect(ptr)) => {
-                let func = self.builder.build_load(self.ptr_ty(), ptr, "").unwrap();
-                self.builder.build_store(dst, func).unwrap();
-            }
-            LayoutValue::Closure(_, ptr) => self.build_memcpy(dst, ptr, &self.closure_ty()),
-            LayoutValue::Fields(fields, ptr) => {
-                self.build_memcpy(dst, ptr, &self.fields_ty(fields));
-            }
-            LayoutValue::Zst => {}
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }
 
     fn build_equals(
         &self,
-        lhs: LayoutValue<'mir, 'ctx>,
-        rhs: LayoutValue<'mir, 'ctx>,
+        ty: TyId,
+        lhs: BasicValueEnum<'ctx>,
+        rhs: BasicValueEnum<'ctx>,
     ) -> IntValue<'ctx> {
-        match (lhs, rhs) {
-            (
-                LayoutValue::Scalar(ScalarKind::Int(_), ScalarLayout::Direct(lhs)),
-                LayoutValue::Scalar(ScalarKind::Int(_), ScalarLayout::Direct(rhs)),
-            ) => self
+        match self.ty_ctx.get(ty) {
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Bool => self
                 .builder
                 .build_int_compare(
                     IntPredicate::EQ,
@@ -603,29 +568,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                     "",
                 )
                 .unwrap(),
-            (
-                LayoutValue::Scalar(ScalarKind::Int(size), ScalarLayout::Indirect(lhs)),
-                LayoutValue::Scalar(ScalarKind::Int(_), ScalarLayout::Indirect(rhs)),
-            ) => {
-                let ty = match size {
-                    IntSize::Bits64 => self.ctx.i64_type(),
-                    IntSize::Bits8 => self.ctx.i8_type(),
-                };
-                let lhs = self.builder.build_load(ty, lhs, "").unwrap();
-                let rhs = self.builder.build_load(ty, rhs, "").unwrap();
-                self.builder
-                    .build_int_compare(
-                        IntPredicate::EQ,
-                        lhs.into_int_value(),
-                        rhs.into_int_value(),
-                        "",
-                    )
-                    .unwrap()
-            }
-            (
-                LayoutValue::Scalar(ScalarKind::Float, ScalarLayout::Direct(lhs)),
-                LayoutValue::Scalar(ScalarKind::Float, ScalarLayout::Direct(rhs)),
-            ) => self
+            Ty::Float => self
                 .builder
                 .build_float_compare(
                     FloatPredicate::OEQ,
@@ -634,59 +577,22 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                     "",
                 )
                 .unwrap(),
-            (
-                LayoutValue::Scalar(ScalarKind::Float, ScalarLayout::Indirect(lhs)),
-                LayoutValue::Scalar(ScalarKind::Float, ScalarLayout::Indirect(rhs)),
-            ) => {
-                let ty = self.ctx.f64_type();
-                let lhs = self.builder.build_load(ty, lhs, "").unwrap();
-                let rhs = self.builder.build_load(ty, rhs, "").unwrap();
-                self.builder
-                    .build_float_compare(
-                        FloatPredicate::OEQ,
-                        lhs.into_float_value(),
-                        rhs.into_float_value(),
-                        "",
-                    )
-                    .unwrap()
-            }
-            (
-                LayoutValue::Scalar(ScalarKind::FuncPtr(_), ScalarLayout::Direct(lhs)),
-                LayoutValue::Scalar(ScalarKind::FuncPtr(_), ScalarLayout::Direct(rhs)),
-            ) => self
-                .builder
-                .build_int_compare(
-                    IntPredicate::EQ,
-                    lhs.into_pointer_value(),
-                    rhs.into_pointer_value(),
-                    "",
-                )
-                .unwrap(),
-            (
-                LayoutValue::Scalar(ScalarKind::FuncPtr(_), ScalarLayout::Indirect(lhs)),
-                LayoutValue::Scalar(ScalarKind::FuncPtr(_), ScalarLayout::Indirect(rhs)),
-            ) => {
-                let lhs = self.builder.build_load(self.ptr_ty(), lhs, "").unwrap();
-                let rhs = self.builder.build_load(self.ptr_ty(), rhs, "").unwrap();
-                self.builder
-                    .build_int_compare(
-                        IntPredicate::EQ,
-                        lhs.into_pointer_value(),
-                        rhs.into_pointer_value(),
-                        "",
-                    )
-                    .unwrap()
-            }
-            (LayoutValue::Closure(_, lhs), LayoutValue::Closure(_, rhs)) => self
+            Ty::Tuple(elem_tys) => self
+                .build_call(self.fields_equals(elem_tys), &[lhs.into(), rhs.into()])
+                .unwrap()
+                .into_int_value(),
+            Ty::Func(params, ret_ty) => self
                 .build_call(self.any_closure_equals(), &[lhs.into(), rhs.into()])
                 .unwrap()
                 .into_int_value(),
-            (LayoutValue::Fields(fields, lhs), LayoutValue::Fields(_, rhs)) => self
-                .build_call(self.fields_equals(fields), &[lhs.into(), rhs.into()])
-                .unwrap()
-                .into_int_value(),
-            (LayoutValue::Zst, LayoutValue::Zst) => self.const_bool(true),
-            _ => unreachable!("mismatched lhs and rhs types"),
+            Ty::Named {
+                ident,
+                opaque,
+                fields,
+                ctor,
+                module,
+            } => todo!(),
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }
 
