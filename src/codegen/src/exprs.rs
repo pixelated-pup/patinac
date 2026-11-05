@@ -7,7 +7,7 @@ use inkwell::{
 
 use irs::{
     mir::{
-        Arg, BlockId, Expr, Func, InfixOp, ItemId, LitValue, LocalId, Place, PrefixOp, Stmt,
+        Arg, BlockId, Expr, Func, FuncId, InfixOp, LitValue, LocalId, Place, PrefixOp, Stmt,
         Terminator, Value,
     },
     ty::{Ty, TyId},
@@ -394,7 +394,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
-    fn emit_closure(&self, func: &'mir Func, body: ItemId, env: &Value) -> BasicValueEnum<'ctx> {
+    fn emit_closure(&self, func: &'mir Func, body: FuncId, env: &Value) -> BasicValueEnum<'ctx> {
         // Create the environment, if one is needed
         let (env_ptr, env_ty) = if let Value::Zst(_) = env {
             (self.const_null(), None)
@@ -418,7 +418,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         };
 
         // Create the final closure
-        let name = self.mir.item(body).ident.str();
+        let name = self.mir.func(body).ident.str();
         let func = self.funcs[func];
         let ty = self.closure_ty();
         let closure = self.build_alloca_entry(ty, "");

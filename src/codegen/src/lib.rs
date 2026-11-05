@@ -102,7 +102,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     /// # Panics
     /// Panics if any functions are invalid, or if writing to the output file fails.
     fn emit(&mut self, opt_level: OptLevel, mode: CodegenMode) {
-        for item in self.mir.items() {
+        for item in self.mir.funcs() {
             match &item.kind {
                 ItemKind::Const { .. } => todo!("Constants"),
                 ItemKind::Func { .. } => {
@@ -140,7 +140,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         //     assert!(func.verify(true));
         // }
 
-        for item in self.mir.items() {
+        for item in self.mir.funcs() {
             match &item.kind {
                 ItemKind::Const { .. } => todo!("Constants"),
                 ItemKind::Func(func) => {

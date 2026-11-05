@@ -4,7 +4,7 @@ use errors::Report;
 use ident::Ident;
 use irs::{
     hir::{self, ExprId, ExprKind, LitExpr, VarId},
-    mir::{self, FieldAccess, Item, LocalId, Place, Terminator, Value},
+    mir::{self, FieldAccess, Func, LocalId, Place, Terminator, Value},
     ty::{Param, Ty, TyId},
 };
 
@@ -51,12 +51,15 @@ impl LowerInfo<'_, '_> {
         }
     }
 
+    /// Caller's responsibility to ensure the result of the value is dropped.
     pub fn lower_as_value(&mut self, expr_id: ExprId) -> Value {
         let expr = self.hir.expr(expr_id);
         match &expr.kind {
-            ExprKind::Var(var) if self.hir.var_info(*var).global => {
-                todo!("Function type stuff")
-                //Value::Zst(self.lower_global(*var))
+            ExprKind::Var(var)
+                if let info = self.hir.var_info(*var)
+                    && info.global =>
+            {
+                Value::Zst(info.ty)
             }
             ExprKind::Lit(lit) => Value::Lit(self.lower_lit(lit, expr.span, expr.ty)),
             ExprKind::Assign { place, value } => {
@@ -85,7 +88,8 @@ impl LowerInfo<'_, '_> {
             ExprKind::Continue => todo!("Unconditional Control Flow"),
             ExprKind::Return(_) => todo!("Unconditional Control Flow"),
             ExprKind::Print(expr) => {
-                let value = self.lower_as_value(*expr); // NEEDS DROP
+                let value = self.lower_as_value(*expr);
+                self.stage_drop_value(&value);
                 self.add_stmt(mir::Stmt::Print(value));
                 Value::Zst(self.ty_ctx.unit())
             }
@@ -207,14 +211,17 @@ impl LowerInfo<'_, '_> {
                 self.block = merge_block;
             }
             ExprKind::Call { callee, args } => {
-                let callee = self.lower_as_value(*callee); // NEEDS DROP
+                let callee = self.lower_as_value(*callee);
+                self.stage_drop_value(&callee);
                 let args = args
                     .iter()
                     .map(|arg| {
                         if arg.mutable {
                             mir::Arg::Place(self.lower_as_place(arg.value))
                         } else {
-                            mir::Arg::Value(self.lower_as_value(arg.value)) // NEEDS DROP
+                            let value = self.lower_as_value(arg.value);
+                            self.stage_drop_value(&value);
+                            mir::Arg::Value(value)
                         }
                     })
                     .collect();
@@ -322,8 +329,6 @@ impl LowerInfo<'_, '_> {
         }
     }
 
-    //fn lower_infix(&self, op: hir::InfixOp, lhs: ExprId, rhs: ExprId) -> mir::
-
     fn lower_lambda(
         &mut self,
         expr: ExprId,
@@ -332,7 +337,7 @@ impl LowerInfo<'_, '_> {
         body: ExprId,
     ) -> mir::Expr {
         // Create a distinct name for the lifted function.
-        let func_name = format!("_lambda{}", self.lambda_counter);
+        let func_name = format!("_{}::closure{}", self.func.ident, self.lambda_counter);
         self.lambda_counter += 1;
 
         let (captures, rebindings): (Vec<_>, Vec<_>) = captures
@@ -388,7 +393,7 @@ impl LowerInfo<'_, '_> {
         stmts.push(mir::Stmt::Expr(self.lower_expr(body)));
         let body = self.mir.add_expr(mir::Expr::Block(mir::BlockExpr(stmts)));
 
-        self.mir.add_item(Item {
+        self.mir.add_item(Func {
             var: func_var,
             kind: ItemKind::Func {
                 params: param_vars,
@@ -465,14 +470,10 @@ const fn convert_prefix_op(op: hir::PrefixOp) -> mir::PrefixOp {
 
 const fn convert_infix_op(op: hir::InfixOp) -> Option<mir::InfixOp> {
     match op {
-        hir::InfixOp::Add => Some(mir::InfixOp::Add),
-        hir::InfixOp::AddF => Some(mir::InfixOp::AddF),
-        hir::InfixOp::Sub => Some(mir::InfixOp::Sub),
-        hir::InfixOp::SubF => Some(mir::InfixOp::SubF),
-        hir::InfixOp::Mul => Some(mir::InfixOp::Mul),
-        hir::InfixOp::MulF => Some(mir::InfixOp::MulF),
-        hir::InfixOp::Div => Some(mir::InfixOp::Div),
-        hir::InfixOp::DivF => Some(mir::InfixOp::DivF),
+        hir::InfixOp::Add | hir::InfixOp::AddF => Some(mir::InfixOp::Add),
+        hir::InfixOp::Sub | hir::InfixOp::SubF => Some(mir::InfixOp::Sub),
+        hir::InfixOp::Mul | hir::InfixOp::MulF => Some(mir::InfixOp::Mul),
+        hir::InfixOp::Div | hir::InfixOp::DivF => Some(mir::InfixOp::Div),
         hir::InfixOp::Exp => Some(mir::InfixOp::Exp),
         hir::InfixOp::And => None,
         hir::InfixOp::Or => None,

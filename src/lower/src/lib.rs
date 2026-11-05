@@ -2,22 +2,19 @@
 
 mod exprs;
 
-use std::{cmp::Reverse, mem};
+use std::mem;
 
 use foldhash::fast::RandomState;
 use ordermap::OrderSet;
-use slotmap::{Key as _, SecondaryMap};
+use slotmap::SecondaryMap;
 
 use errors::ErrorHandler;
 use ident::Ident;
 use irs::{
     ModuleId,
-    hir::{self, DefItem, DefKind, ExprId, Hir, VarId},
-    mir::{
-        self, Block, BlockId, FieldAccess, Func, Item, ItemId, ItemKind, Local, LocalId, Mir,
-        Place, Terminator, Value,
-    },
-    ty::{self, Ty, TyContext, TyId},
+    hir::{DefItem, DefKind, ExprId, Hir, VarId},
+    mir::{self, Block, BlockId, FieldAccess, Func, Local, LocalId, Mir, Place, Terminator, Value},
+    ty::{Ty, TyContext, TyId},
 };
 
 struct LowerInfo<'ext, 'func> {
@@ -40,7 +37,7 @@ pub fn lower(hir: &Hir, ty_ctx: &TyContext, handler: ErrorHandler<'_>) -> Mir {
 
     for item in hir.defs() {
         let item = lower_item(hir, ty_ctx, &handler, item);
-        mir.add_item(item);
+        mir.add_func(item);
     }
 
     // if let Some(main) = self.hir.main() {
@@ -52,18 +49,21 @@ pub fn lower(hir: &Hir, ty_ctx: &TyContext, handler: ErrorHandler<'_>) -> Mir {
     todo!()
 }
 
-fn lower_item(hir: &Hir, ty_ctx: &TyContext, handler: &ErrorHandler<'_>, item: &DefItem) -> Item {
-    let kind = match &item.kind {
-        DefKind::Const(expr) => todo!(),
-        DefKind::Func { params, body } => {
-            ItemKind::Func(lower_func(hir, ty_ctx, handler, params, *body, item.module))
-        }
-    };
+fn lower_item(hir: &Hir, ty_ctx: &TyContext, handler: &ErrorHandler<'_>, item: &DefItem) -> Func {
     let info = hir.var_info(item.var);
-    Item {
-        ident: info.ident.ident,
-        ty: info.ty,
-        kind,
+    match &item.kind {
+        DefKind::Const(expr) => {
+            lower_const(hir, ty_ctx, handler, info.ident.ident, *expr, item.module)
+        }
+        DefKind::Func { params, body } => lower_func(
+            hir,
+            ty_ctx,
+            handler,
+            info.ident.ident,
+            params,
+            *body,
+            item.module,
+        ),
     }
 }
 
@@ -71,37 +71,24 @@ fn lower_func(
     hir: &Hir,
     ty_ctx: &TyContext,
     handler: &ErrorHandler<'_>,
+    ident: Ident,
     params: &[VarId],
     body: ExprId,
     module: ModuleId,
 ) -> Func {
-    let mut func = Func::new(params.len(), hir.expr(body).ty);
+    let mut func = Func::new(ident, params.len(), hir.expr(body).ty);
+    let mut builder = LowerInfo::new(hir, ty_ctx, handler, module, &mut func);
 
     // Set up function parameters.
-    let mut var_map = SecondaryMap::new();
     for &param in params {
         let info = hir.var_info(param);
-        let local = func.add_local(Local {
+        let local = builder.func.add_local(Local {
             ident: Some(info.ident.ident),
             mutable: info.mutable,
             ty: info.ty,
         });
-        var_map.insert(param, local);
+        builder.var_map.insert(param, local);
     }
-
-    let entry = func.add_block();
-
-    let mut builder = LowerInfo {
-        hir,
-        ty_ctx,
-        handler,
-        module,
-        var_map,
-        drop_stack: OrderSet::default(),
-        lambda_counter: 0,
-        func: &mut func,
-        block: entry,
-    };
 
     // Lower the function body and build the function return.
     let ret_value = builder.lower_as_value(body);
@@ -110,12 +97,37 @@ fn lower_func(
     func
 }
 
+fn lower_const(
+    hir: &Hir,
+    ty_ctx: &TyContext,
+    handler: &ErrorHandler<'_>,
+    ident: Ident,
+    expr: ExprId,
+    module: ModuleId,
+) -> Func {
+    let mut func = Func::new(ident, 0, hir.expr(expr).ty);
+    let mut builder = LowerInfo::new(hir, ty_ctx, handler, module, &mut func);
+
+    // Lower the function body and build the function return.
+    // let ret_value = builder.lower_as_value(body);
+    // builder.set_term(mir::Terminator::Return(ret_value));
+    todo!();
+
+    func
+}
+
 fn lower_ctor(ty_ctx: &TyContext, ty: TyId) -> Func {
-    let Ty::Named { fields, ctor, .. } = ty_ctx.get(ty) else {
+    let Ty::Named {
+        ident,
+        fields,
+        ctor,
+        ..
+    } = ty_ctx.get(ty)
+    else {
         unreachable!("ICE: Attempted to lower constructor for non-named type")
     };
 
-    let mut func = Func::new(fields.len(), ty);
+    let mut func = Func::new(*ident, fields.len(), ty);
     let entry = func.add_block();
 
     let temp = func.add_temp(ty);
@@ -150,7 +162,28 @@ fn lower_ctor(ty_ctx: &TyContext, ty: TyId) -> Func {
     func
 }
 
-impl LowerInfo<'_, '_> {
+impl<'ext, 'func> LowerInfo<'ext, 'func> {
+    fn new(
+        hir: &'ext Hir,
+        ty_ctx: &'ext TyContext,
+        handler: &'ext ErrorHandler<'ext>,
+        module: ModuleId,
+        func: &'func mut Func,
+    ) -> Self {
+        let block = func.add_block();
+        Self {
+            hir,
+            ty_ctx,
+            handler,
+            module,
+            var_map: SecondaryMap::new(),
+            drop_stack: OrderSet::default(),
+            lambda_counter: 0,
+            func,
+            block,
+        }
+    }
+
     fn block_mut(&mut self) -> &mut Block {
         self.func.block_mut(self.block)
     }
@@ -165,6 +198,13 @@ impl LowerInfo<'_, '_> {
 
     fn stage_drop(&mut self, local: LocalId) {
         self.drop_stack.insert(local);
+    }
+
+    fn stage_drop_value(&mut self, value: &Value) {
+        match value {
+            Value::Copy(place) | Value::Move(place) => self.stage_drop(place.base),
+            Value::Lit(_) | Value::Zst(_) => {}
+        }
     }
 
     fn unstage_drop(&mut self, local: LocalId) {

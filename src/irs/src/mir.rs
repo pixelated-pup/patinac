@@ -6,84 +6,63 @@ use ident::Ident;
 
 use crate::ty::TyId;
 
-/// The mid-level intermediate representation of Patina.
+/// The mid-level intermediate representation of Patina, a CFG with no nested expressions.
 ///
-/// - Expressions have been flattened into something between ANF and SSA
-/// - Control flow has been lowered to gotos
 /// - Lambdas have been lowered to closures
-/// - Records have been erased and are equivalent to tuples
 /// - Location information has been stripped
 /// - Type information has been trimmed down to what is necessary
 /// Eventually:
+/// - Methods have been desugared into regular functions
+/// - Constants will have been desugared into functions
 /// - Generics will have been monomorphised
 /// - Pattern matching will have been lowered to switching on integers
 #[derive(Debug, Default)]
 pub struct Mir {
-    main: Option<ItemId>,
-    items: SlotMap<ItemId, Item>,
+    main: Option<FuncId>,
+    funcs: SlotMap<FuncId, Func>,
 }
 
 impl Mir {
-    /// Returns an iterator over all of the items.
-    pub fn items(&self) -> impl Iterator<Item = &Item> {
-        self.items.values()
+    /// Returns an iterator over all of the functions.
+    pub fn funcs(&self) -> impl Iterator<Item = &Func> {
+        self.funcs.values()
     }
 
-    /// Adds an item, returning a unique ID for it.
-    pub fn add_item(&mut self, item: Item) -> ItemId {
-        self.items.insert(item)
+    /// Adds a function, returning a unique ID for it.
+    pub fn add_func(&mut self, func: Func) -> FuncId {
+        self.funcs.insert(func)
     }
 
-    /// Returns the information for the given item.
-    pub fn item(&self, id: ItemId) -> &Item {
-        &self.items[id]
+    /// Returns the information for the given function.
+    pub fn func(&self, id: FuncId) -> &Func {
+        &self.funcs[id]
     }
 
     /// Returns the main function, if it exists.
-    pub const fn main(&self) -> Option<ItemId> {
+    pub const fn main(&self) -> Option<FuncId> {
         self.main
     }
 
     /// Sets the main function.
-    pub fn set_main(&mut self, main: ItemId) {
+    pub fn set_main(&mut self, main: FuncId) {
         self.main = Some(main);
     }
 }
 
 new_key_type! {
-    /// An ID representing an item.
-    pub struct ItemId;
-}
-
-/// An item.
-///
-/// The only items directly tracked by the MIR are functions and constants,
-/// known as "definition items" in earlier IRs.
-/// Methods have also been fully desugared into regular functions.
-#[derive(Debug)]
-pub struct Item {
-    /// The user-defined name of the item.
-    pub ident: Ident,
-    /// The type of the item.
-    pub ty: TyId,
-    /// The kind of item.
-    pub kind: ItemKind,
-}
-
-#[derive(Debug)]
-pub enum ItemKind {
-    /// A constant item.
-    ///
-    /// The definition of constant used here is more specific than a source-language constant: These are specifically constants with literal values.
-    /// All other constants are lazily-initialised and therefore lowered to functions.
-    Const(LitValue),
-    /// A function item.
-    Func(Func),
+    /// An ID representing a function.
+    pub struct FuncId;
 }
 
 /// A function item.
+///
+/// This is the only kind of item in the MIR, as constants are lowered to functions.
 #[derive(Debug)]
 pub struct Func {
+    /// The user-defined name of the function.
+    pub ident: Ident,
+    /// The type of the function.
+    // pub ty: TyId,
     /// The number of parameters that the function has.
     pub param_count: usize,
     /// The return type of the function.
@@ -98,8 +77,9 @@ pub struct Func {
 }
 
 impl Func {
-    pub fn new(param_count: usize, ret_ty: TyId) -> Self {
+    pub fn new(ident: Ident, param_count: usize, ret_ty: TyId) -> Self {
         Self {
+            ident,
             param_count,
             ret_ty,
             locals: SlotMap::default(),
@@ -251,7 +231,7 @@ pub enum Expr {
     /// A closure.
     Closure {
         /// The lifted function representing the closure body.
-        body: ItemId,
+        body: FuncId,
         /// The environment, containing the captured values.
         env: Value,
     },
