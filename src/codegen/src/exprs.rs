@@ -387,7 +387,9 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 let func = self.builder.build_load(self.ptr_ty(), func, "").unwrap();
                 self.build_indirect_call(func_ty, func.into_pointer_value(), &args)
             }
-            // TODO: Direct functoin calls
+            Ty::FuncItem() => {
+                todo!();
+            }
             _ => unreachable!("wrong type for function"),
         }
     }
