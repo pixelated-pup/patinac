@@ -10,7 +10,6 @@
 
 mod config;
 mod exprs;
-mod layout;
 mod runtime;
 mod witnesses;
 
@@ -40,7 +39,6 @@ use irs::{
     ty::{Param, Ty, TyContext, TyId},
 };
 
-use crate::layout::{LayoutValue, StorageClass};
 pub use config::*;
 
 /// # Panics
@@ -155,21 +153,17 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                     self.builder.position_at_end(entry_block);
 
                     // Skip the first argument if it's an out-pointer.
-                    let offset = if layout::indirect(ret_ty) { 1 } else { 0 };
+                    let offset = if self.is_indirect(*ret_ty) { 1 } else { 0 };
                     let mut args = llvm_func.get_param_iter().skip(offset);
                     for id in params {
                         let info = self.mir.var(*id);
                         // We don't actually pass ZSTs.
-                        if layout::zst(&info.ty) {
+                        if self.is_zst(info.ty) {
                             self.vars.insert(*id, LayoutValue::Zst);
                             continue;
                         }
                         let value = args.next().expect("there should be enough args");
-                        let value = if info.mutable {
-                            self.layout_indirect(&info.ty, value.into_pointer_value())
-                        } else {
-                            self.layout(&info.ty, value)
-                        };
+                        todo!();
                         self.vars.insert(*id, value);
                     }
 
@@ -288,12 +282,12 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         let mut param_tys: Vec<_> = params
             .iter()
             .filter_map(|p| {
-                if layout::zst(&p.ty) {
+                if self.is_zst(p.ty) {
                     None // Skip passing ZSTs.
-                } else if p.mutable || layout::indirect(&p.ty) {
+                } else if p.mutable || self.is_indirect(p.ty) {
                     Some(self.ptr_ty().into()) // Pass stack pointers for mutable parameters or indirect types.
                 } else {
-                    Some(self.lower_ty(&p.ty).into()) // Pass by value otherwise.
+                    Some(self.lower_ty(p.ty).into()) // Pass by value otherwise.
                 }
             })
             .collect();
@@ -304,7 +298,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
 
         // Add parameter for return out-pointer if needed.
-        match layout::storage_class(self.ty_ctx.get(ret_ty)) {
+        match self.storage_class(ret_ty) {
             StorageClass::Zst => self.ctx.void_type().fn_type(&param_tys, false),
             StorageClass::Indirect => {
                 param_tys.insert(0, self.ptr_ty().into());
@@ -376,62 +370,6 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         self.ctx.ptr_type(AddressSpace::default()).const_null()
     }
 
-    fn layout(&self, ty: TyId, value: BasicValueEnum<'ctx>) -> LayoutValue<'mir, 'ctx> {
-        match self.ty_ctx.get(ty) {
-            Ty::Int | Ty::UInt => LayoutValue::int(value),
-            Ty::Byte | Ty::Bool => LayoutValue::int(value),
-            Ty::Float => LayoutValue::float(value),
-            // FIXME: Account for non-capturing functions.
-            Ty::Func(params, ret_ty) => LayoutValue::Closure(
-                self.func_ty(params, *ret_ty, true),
-                value.into_pointer_value(),
-            ),
-            Ty::Fields(fields) => LayoutValue::Fields(fields, value.into_pointer_value()),
-        }
-    }
-
-    fn layout_indirect(&self, ty: TyId, ptr: PointerValue<'ctx>) -> LayoutValue<'mir, 'ctx> {
-        match self.ty_ctx.get(ty) {
-            // FIXME: Account for non-capturing functions.
-            Ty::Func(params, ret_ty) => {
-                LayoutValue::Closure(self.func_ty(params, *ret_ty, true), ptr)
-            }
-            Ty::Fields(fields) => LayoutValue::Fields(fields, ptr),
-            _ => panic!(),
-        }
-    }
-
-    fn layout_direct(&self, ty: TyId, ptr: PointerValue<'ctx>) -> LayoutValue<'mir, 'ctx> {
-        match self.ty_ctx.get(ty) {
-            Ty::Int | Ty::UInt => {
-                let int = self
-                    .builder
-                    .build_load(self.ctx.i64_type(), ptr, "")
-                    .unwrap();
-                LayoutValue::int(int)
-            }
-            Ty::Byte | Ty::Bool => {
-                let int = self
-                    .builder
-                    .build_load(self.ctx.i8_type(), ptr, "")
-                    .unwrap();
-                LayoutValue::int(int)
-            }
-            Ty::Float => {
-                let float = self
-                    .builder
-                    .build_load(self.ctx.f64_type(), ptr, "")
-                    .unwrap();
-                LayoutValue::float(float)
-            }
-            // FIXME: Account for non-capturing functions.
-            Ty::Func(params, ret_ty) => {
-                LayoutValue::Closure(self.func_ty(params, ret_ty, true), ptr)
-            }
-            Ty::Fields(fields) => LayoutValue::Fields(fields, ptr),
-        }
-    }
-
     /// # Panics
     /// Panics if the builder is not positioned, or is positioned but not within a function.
     fn build_alloca_entry(&self, ty: BasicTypeEnum<'ctx>, name: &str) -> PointerValue<'ctx> {
@@ -461,7 +399,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             Ty::Tuple(elem_tys) => {
                 self.build_call(self.fields_drop(elem_tys), &[place.into()]);
             }
-            Ty::Func(params, ret_ty) => {
+            Ty::Func(_, _) => {
                 self.build_call(self.any_closure_drop(), &[place.into()]);
             }
             Ty::Named {
@@ -637,36 +575,84 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         name
     }
 
-    fn mangle_ty(&self, ty: &Ty) -> String {
-        match ty {
+    fn mangle_ty(&self, ty: TyId) -> String {
+        match self.ty_ctx.get(ty) {
             Ty::Int => "i".to_string(),
             Ty::UInt => "u".to_string(),
             Ty::Byte => "h".to_string(),
             Ty::Float => "f".to_string(),
             Ty::Bool => "b".to_string(),
+            Ty::Tuple(elem_tys) => self.mangle_fields_ty(elem_tys),
             Ty::Func(params, ret_ty) => {
                 let param_names = params.iter().fold(String::new(), |mut s, p| {
                     let prefix = if p.mutable { "M" } else { "P" };
-                    let _ = write!(s, "{prefix}{}", self.mangle_ty(&p.ty));
+                    let _ = write!(s, "{prefix}{}", self.mangle_ty(p.ty));
                     s
                 });
-                format!("F{param_names}R{}", self.mangle_ty(ret_ty))
+                format!("F{param_names}R{}", self.mangle_ty(*ret_ty))
             }
-            Ty::Fields(fields) => self.mangle_fields_ty(fields),
+            Ty::Named {
+                ident,
+                opaque,
+                fields,
+                ctor,
+                module,
+            } => todo!(),
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }
 
-    fn mangle_fields_ty(&self, fields: &[Ty]) -> String {
+    fn mangle_fields_ty(&self, fields: &[TyId]) -> String {
         format!(
             "({})",
             fields
                 .iter()
-                .map(|ty| self.mangle_ty(ty))
+                .map(|ty| self.mangle_ty(*ty))
                 .collect::<String>()
         )
     }
 
-    fn mangle_array_ty(&self, elem_ty: &Ty) -> String {
-        format!("A{}", self.mangle_ty(elem_ty))
+    fn storage_class(&self, ty: TyId) -> StorageClass {
+        match self.ty_ctx.get(ty) {
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => StorageClass::Scalar,
+            Ty::Tuple(_) | Ty::Func(_, _) => StorageClass::Indirect,
+            Ty::Fields(elem_tys) => {
+                if elem_tys.is_empty() {
+                    StorageClass::Zst
+                } else {
+                    StorageClass::Indirect
+                }
+            }
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
+        }
     }
+
+    fn is_indirect(&self, ty: TyId) -> bool {
+        self.storage_class(ty) == StorageClass::Indirect
+    }
+
+    fn is_zst(&self, ty: TyId) -> bool {
+        self.storage_class(ty) == StorageClass::Zst
+    }
+
+    fn is_trivial(&self, ty: TyId) -> bool {
+        match self.ty_ctx.get(ty) {
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => true,
+            Ty::Tuple(elem_tys) => elem_tys.iter().all(|ty| self.is_trivial(*ty)),
+            Ty::Func(_, _) => false, // FIXME: Account for non-capturing functions.
+            Ty::Named { fields, .. } => fields.values().all(|ty| self.is_trivial(*ty)),
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
+        }
+    }
+
+    fn all_trivial(&self, tys: &[TyId]) -> bool {
+        tys.iter().all(|ty| self.is_trivial(*ty))
+    }
+}
+
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+enum StorageClass {
+    Zst,
+    Indirect,
+    Scalar,
 }

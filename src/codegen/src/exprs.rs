@@ -14,10 +14,7 @@ use irs::{
 };
 use slotmap::SecondaryMap;
 
-use crate::{
-    CodegenState,
-    layout::{self, LayoutValue, StorageClass},
-};
+use crate::{CodegenState, StorageClass};
 
 impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     fn place_ty(&self, func: &'mir Func, place: &Place) -> TyId {
@@ -96,7 +93,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             }
             Terminator::Return(value) => {
                 let value = self.emit_value(mir_func, value);
-                match layout::storage_class(self.ty_ctx.get(mir_func.ret_ty)) {
+                match self.storage_class(mir_func.ret_ty) {
                     StorageClass::Zst => {
                         self.builder.build_return(None).unwrap();
                     }
@@ -354,7 +351,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             })
             .collect();
 
-        match layout::storage_class(self.ty_ctx.get(ret_ty)) {
+        match self.storage_class(ret_ty) {
             StorageClass::Zst => {
                 self.emit_call_inner(callee_ty, callee, args);
             }
@@ -397,7 +394,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
 
     fn emit_closure(&self, func: &'mir Func, body: ItemId, env: &Value) -> BasicValueEnum<'ctx> {
         // Create the environment, if one is needed
-        let (env, env_ty) = if let Value::Zst(_) = env {
+        let (env_ptr, env_ty) = if let Value::Zst(_) = env {
             (self.const_null(), None)
         } else {
             let env_ty = self.value_ty(func, env);
@@ -430,22 +427,22 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             self.builder.build_store(ptr, val).unwrap();
         };
         store(0, func.as_global_value().as_pointer_value());
-        store(1, env);
+        store(1, env_ptr);
         store(
             2,
-            self.closure_drop(&name, captures, env_ty)
+            self.closure_drop(&name, env_ty)
                 .as_global_value()
                 .as_pointer_value(),
         );
         store(
             3,
-            self.closure_copy(&name, captures, env_ty)
+            self.closure_copy(&name, env, env_ty)
                 .as_global_value()
                 .as_pointer_value(),
         );
         store(
             4,
-            self.closure_equals(&name, captures, env_ty)
+            self.closure_equals(&name)
                 .as_global_value()
                 .as_pointer_value(),
         );
