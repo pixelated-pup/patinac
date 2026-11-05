@@ -13,7 +13,7 @@ impl TypeChecker<'_, '_, '_> {
         let expr = self.hir.expr(expr);
         let module = expr.module;
         let ty = match &expr.kind {
-            ExprKind::Var(id) => self.hir.var_info(*id).ty,
+            ExprKind::Var(id) => self.hir.var(*id).ty,
             ExprKind::Lit(lit) => match lit {
                 LitExpr::Int(_) => self.ty_ctx.fresh_int_var(),
                 LitExpr::Float(_) => self.ty_ctx.float(),
@@ -22,7 +22,7 @@ impl TypeChecker<'_, '_, '_> {
             },
             ExprKind::Tuple(exprs) => {
                 let elem_tys = self.infer_exprs(exprs);
-                self.ty_ctx.intern(Ty::Tuple(elem_tys))
+                self.ty_ctx.intern_ty(Ty::Tuple(elem_tys))
             }
             ExprKind::Infix(op, lhs, rhs) => self.infer_expr_infix(*op, *lhs, *rhs),
             ExprKind::Prefix(op, expr) => self.infer_expr_prefix(*op, *expr),
@@ -36,7 +36,7 @@ impl TypeChecker<'_, '_, '_> {
                     })
                     .collect();
                 let ret_ty = self.ty_ctx.fresh_var();
-                let func_ty = self.ty_ctx.intern(Ty::Func(arg_tys, ret_ty));
+                let func_ty = self.ty_ctx.intern_ty(Ty::Func(arg_tys, ret_ty));
                 self.unify_expr_ty(*callee, func_ty);
                 ret_ty
             }
@@ -50,7 +50,7 @@ impl TypeChecker<'_, '_, '_> {
                     })
                     .collect();
                 let ret_ty = self.ty_ctx.fresh_var();
-                let method_ty = self.ty_ctx.intern(Ty::Func(arg_tys, ret_ty));
+                let method_ty = self.ty_ctx.intern_ty(Ty::Func(arg_tys, ret_ty));
                 todo!("Method Resolution");
                 // let Some(field) = self.hir.ty_info(base_id).fields.get(&field_name.ident) else {
                 //     return Err(
@@ -75,7 +75,7 @@ impl TypeChecker<'_, '_, '_> {
                 let param_tys = params
                     .iter()
                     .map(|param| {
-                        let info = self.hir.var_info(*param);
+                        let info = self.hir.var(*param);
                         Param {
                             ty: info.ty,
                             mutable: info.mutable,
@@ -83,7 +83,7 @@ impl TypeChecker<'_, '_, '_> {
                     })
                     .collect();
                 let body_ty = self.infer_expr(*body);
-                self.ty_ctx.intern(Ty::Func(param_tys, body_ty))
+                self.ty_ctx.intern_ty(Ty::Func(param_tys, body_ty))
             }
             ExprKind::Assign { place, value } => {
                 let place_ty = self.infer_expr(*place);
@@ -180,7 +180,7 @@ impl TypeChecker<'_, '_, '_> {
 
         let base = self.hir.expr(base);
 
-        match self.ty_ctx.get(base_ty) {
+        match self.ty_ctx.get_ty(base_ty) {
             Ty::Named { opaque, module, .. } if *opaque && *module != base.module => {
                 self.report(ErrorKind::OpaqueType(base_ty), base.span, base.module);
             }
@@ -215,7 +215,7 @@ impl TypeChecker<'_, '_, '_> {
             .iter()
             .map(|stmt| match stmt {
                 Stmt::Decl { var, value, .. } => {
-                    let var_ty = self.hir.var_info(*var).ty;
+                    let var_ty = self.hir.var(*var).ty;
                     self.unify_expr_ty(*value, var_ty);
                     self.ty_ctx.unit()
                 }

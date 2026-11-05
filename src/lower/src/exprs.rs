@@ -1,11 +1,11 @@
-use std::range::Range;
+use std::{fmt::Display, range::Range};
 
 use errors::Report;
 use ident::Ident;
 use irs::{
     hir::{self, ExprId, ExprKind, LitExpr, VarId},
     mir::{self, FieldAccess, Func, Local, LocalId, Place, Terminator, Value},
-    ty::{Ty, TyId},
+    ty::{DefInfo, Ty, TyId},
 };
 
 use crate::LowerInfo;
@@ -114,7 +114,7 @@ impl LowerInfo<'_, '_> {
                 Place::local(self.lower_local(*var))
             }
             ExprKind::Field { base, field } if !self.ty_ctx.is_zst(expr.ty) => {
-                let Ty::Named { fields, .. } = self.ty_ctx.get(self.hir.expr(*base).ty) else {
+                let Ty::Named { fields, .. } = self.ty_ctx.get_ty(self.hir.expr(*base).ty) else {
                     unreachable!("field access of non-record type")
                 };
                 let mut place = self.lower_as_place(*base);
@@ -282,18 +282,18 @@ impl LowerInfo<'_, '_> {
     }
 
     fn lower_lit(&self, lit: &LitExpr, span: Range<u32>, ty: TyId) -> mir::LitValue {
+        let warn = |msg| {
+            self.handler
+                .report(Report::warning(msg), span, self.ty_ctx.def(self.def).module);
+        };
         match lit {
-            &LitExpr::Int(value) => match self.ty_ctx.get(ty) {
+            &LitExpr::Int(value) => match self.ty_ctx.get_ty(ty) {
                 Ty::Int => {
                     let i = i64::try_from(value).unwrap_or_else(|_| {
-                        self.handler.report(
-                            Report::warning(format!(
-                                "int literal {value} overflowed and was clamped to {}",
-                                i64::MAX
-                            )),
-                            span,
-                            self.module,
-                        );
+                        warn(format!(
+                            "int literal {value} overflowed and was clamped to {}",
+                            i64::MAX
+                        ));
                         i64::MAX
                     });
                     mir::LitValue::Int(i)
@@ -301,14 +301,10 @@ impl LowerInfo<'_, '_> {
                 Ty::UInt => mir::LitValue::UInt(value),
                 Ty::Byte => {
                     let b = u8::try_from(value).unwrap_or_else(|_| {
-                        self.handler.report(
-                            Report::warning(format!(
-                                "byte literal {value} overflowed and was clamped to {}",
-                                u8::MAX
-                            )),
-                            span,
-                            self.module,
-                        );
+                        warn(format!(
+                            "byte literal {value} overflowed and was clamped to {}",
+                            u8::MAX
+                        ));
                         u8::MAX
                     });
                     mir::LitValue::Byte(b)
@@ -328,16 +324,12 @@ impl LowerInfo<'_, '_> {
         captures: &[VarId],
         body: ExprId,
     ) -> mir::Expr {
-        // Create a distinct name for the lifted function.
-        let func_name = format!("_{}::closure{}", self.func.ident, self.lambda_counter);
-        self.lambda_counter += 1;
-
         // Create a type for the environment.
         let capture_tys = captures
             .iter()
-            .map(|&capture| self.hir.var_info(capture).ty)
+            .map(|&capture| self.hir.var(capture).ty)
             .collect();
-        let env_ty = self.ty_ctx.intern(Ty::Tuple(capture_tys));
+        let env_ty = self.ty_ctx.intern_ty(Ty::Tuple(capture_tys));
 
         // Construct the environment.
         let env = self.func.add_temp(env_ty);
@@ -368,11 +360,16 @@ impl LowerInfo<'_, '_> {
         //     mutable: false,
         // });
 
-        let mut body_func = Func::new(
-            Ident::new(&func_name),
-            params.len() + 1,
-            self.hir.expr(body).ty,
+        // Create a distinct name for the lifted function.
+        let func_name = format!(
+            "_{}::closure{}",
+            self.ty_ctx.def(self.def).ident,
+            self.lambda_counter
         );
+        self.lambda_counter += 1;
+
+        let mut body_func = Func::new(params.len() + 1, self.hir.expr(body).ty);
+        let def = self.ty_ctx.add_def(DefInfo { ident: Ident });
         let mut builder = LowerInfo::new(
             self.hir,
             self.ty_ctx,
@@ -406,7 +403,7 @@ impl LowerInfo<'_, '_> {
     ) {
         // Set up function parameters.
         for &param in params {
-            let info = self.hir.var_info(param);
+            let info = self.hir.var(param);
             let local = self.func.add_local(Local {
                 ident: Some(info.ident.ident),
                 mutable: info.mutable,

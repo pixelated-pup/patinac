@@ -2,41 +2,37 @@
 
 use std::range::Range;
 
-use slotmap::{SlotMap, new_key_type};
+use slotmap::{SecondaryMap, SlotMap, new_key_type};
 
 use ident::SpanIdent;
 
-use crate::{ModuleId, ty::TyId};
+use crate::{
+    ModuleId,
+    ty::{DefId, TyId},
+};
 
 /// An AST-like structure, with additional metadata in the form of type information and resolved variable identifiers.
 #[derive(Debug, Default)]
 pub struct Hir {
-    main: Option<DefItem>,
-    defs: Vec<DefItem>,
-
+    defs: SecondaryMap<DefId, DefItem>,
     exprs: SlotMap<ExprId, Expr>,
-    vars: SlotMap<VarId, VarInfo>,
+    vars: SlotMap<VarId, Var>,
 }
 
 impl Hir {
-    /// Returns all of the "executable items". These are the items that contain expressions.
-    pub fn defs(&self) -> &[DefItem] {
-        &self.defs
+    /// Adds the HIR for the given definition.
+    pub fn add_def(&mut self, id: DefId, def: DefItem) {
+        self.defs.insert(id, def);
     }
 
-    /// Adds an "executable item". These are the items that contain expressions.
-    pub fn add_def(&mut self, exec: DefItem) {
-        self.defs.push(exec);
+    /// Returns the HIR for the given function.
+    pub fn def(&self, def: DefId) -> &DefItem {
+        &self.defs[def]
     }
 
-    /// Returns the main function, if it exists.
-    pub const fn main(&self) -> Option<&DefItem> {
-        self.main.as_ref()
-    }
-
-    /// Sets the main function.
-    pub fn set_main(&mut self, main: DefItem) {
-        self.main = Some(main);
+    /// Returns an iterator over all of the definitions.
+    pub fn defs(&self) -> impl Iterator<Item = &DefItem> {
+        self.defs.values()
     }
 }
 
@@ -72,17 +68,17 @@ impl Hir {
 // Var-related functions
 impl Hir {
     /// Adds a variable with the provided information, returning a unique ID for it.
-    pub fn add_var(&mut self, info: VarInfo) -> VarId {
+    pub fn add_var(&mut self, info: Var) -> VarId {
         self.vars.insert(info)
     }
 
     /// Returns the information for the given variable.
-    pub fn var_info(&self, id: VarId) -> VarInfo {
+    pub fn var(&self, id: VarId) -> Var {
         self.vars[id]
     }
 
     /// Returns an iterator over all the variables.
-    pub fn vars(&self) -> impl Iterator<Item = &VarInfo> {
+    pub fn vars(&self) -> impl Iterator<Item = &Var> {
         self.vars.values()
     }
 }
@@ -94,8 +90,6 @@ pub struct DefItem {
     pub var: VarId,
     /// The kind of the item (constant or function).
     pub kind: DefKind,
-    /// The module containing the item's definition.
-    pub module: ModuleId,
 }
 
 /// The information of an [`DefItem`] specific to whether it's a constant or function.
@@ -118,7 +112,7 @@ new_key_type! {
 }
 /// Information for a variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VarInfo {
+pub struct Var {
     /// The name of the variable, with span.
     pub ident: SpanIdent,
     /// Whether the variable was declared mutable.

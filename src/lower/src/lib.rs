@@ -9,35 +9,33 @@ use ordermap::OrderSet;
 use slotmap::SecondaryMap;
 
 use errors::ErrorHandler;
-use ident::Ident;
 use irs::{
-    ModuleId,
-    hir::{DefItem, DefKind, ExprId, Hir, VarId},
+    hir::{DefKind, ExprId, Hir, VarId},
     mir::{self, Block, BlockId, FieldAccess, Func, Local, LocalId, Mir, Place, Terminator, Value},
-    ty::{Ty, TyContext, TyId},
+    ty::{DefId, Ty, TyContext, TyId},
 };
 
 struct LowerInfo<'ext, 'func> {
     hir: &'ext Hir,
-    ty_ctx: &'ext TyContext,
+    ty_ctx: &'ext mut TyContext,
     handler: &'ext ErrorHandler<'ext>,
-    module: ModuleId,
     var_map: SecondaryMap<VarId, LocalId>,
     drop_stack: OrderSet<LocalId, RandomState>,
     lambda_counter: u32,
+    def: DefId,
     func: &'func mut Func,
     block: BlockId,
 }
 
 /// Lowers the provided [`Hir`] into a [`Mir`].
-pub fn lower(hir: &Hir, ty_ctx: &TyContext, handler: ErrorHandler<'_>) -> Mir {
+pub fn lower(hir: &Hir, ty_ctx: &mut TyContext, handler: ErrorHandler<'_>) -> Mir {
     let mut mir = Mir::default();
 
     //for ty in ty_ctx.
 
-    for item in hir.defs() {
-        let item = lower_item(hir, ty_ctx, &handler, item);
-        mir.add_func(item);
+    for def in hir.defs() {
+        let func = lower_item(hir, ty_ctx, &handler, def);
+        mir.add_func(def, func);
     }
 
     // if let Some(main) = self.hir.main() {
@@ -49,39 +47,27 @@ pub fn lower(hir: &Hir, ty_ctx: &TyContext, handler: ErrorHandler<'_>) -> Mir {
     todo!()
 }
 
-fn lower_item(hir: &Hir, ty_ctx: &TyContext, handler: &ErrorHandler<'_>, item: &DefItem) -> Func {
-    let info = hir.var_info(item.var);
-    match &item.kind {
-        DefKind::Const(expr) => {
-            lower_const(hir, ty_ctx, handler, info.ident.ident, *expr, item.module)
-        }
-        DefKind::Func { params, body } => lower_func(
-            hir,
-            ty_ctx,
-            handler,
-            info.ident.ident,
-            params,
-            *body,
-            item.module,
-        ),
+fn lower_item(hir: &Hir, ty_ctx: &mut TyContext, handler: &ErrorHandler<'_>, def: DefId) -> Func {
+    match &hir.def(def).kind {
+        DefKind::Const(expr) => lower_const(hir, ty_ctx, handler, def, *expr),
+        DefKind::Func { params, body } => lower_func(hir, ty_ctx, handler, def, params, *body),
     }
 }
 
 fn lower_func(
     hir: &Hir,
-    ty_ctx: &TyContext,
+    ty_ctx: &mut TyContext,
     handler: &ErrorHandler<'_>,
-    ident: Ident,
+    def: DefId,
     params: &[VarId],
     body: ExprId,
-    module: ModuleId,
 ) -> Func {
-    let mut func = Func::new(ident, params.len(), hir.expr(body).ty);
-    let mut builder = LowerInfo::new(hir, ty_ctx, handler, module, &mut func);
+    let mut func = Func::new(params.len(), hir.expr(body).ty);
+    let mut builder = LowerInfo::new(hir, ty_ctx, handler, def, &mut func);
 
     // Set up function parameters.
     for &param in params {
-        let info = hir.var_info(param);
+        let info = hir.var(param);
         let local = builder.func.add_local(Local {
             ident: Some(info.ident.ident),
             mutable: info.mutable,
@@ -99,14 +85,13 @@ fn lower_func(
 
 fn lower_const(
     hir: &Hir,
-    ty_ctx: &TyContext,
+    ty_ctx: &mut TyContext,
     handler: &ErrorHandler<'_>,
-    ident: Ident,
+    def: DefId,
     expr: ExprId,
-    module: ModuleId,
 ) -> Func {
-    let mut func = Func::new(ident, 0, hir.expr(expr).ty);
-    let mut builder = LowerInfo::new(hir, ty_ctx, handler, module, &mut func);
+    let mut func = Func::new(0, hir.expr(expr).ty);
+    let mut builder = LowerInfo::new(hir, ty_ctx, handler, def, &mut func);
 
     // Lower the function body and build the function return.
     // let ret_value = builder.lower_as_value(body);
@@ -117,17 +102,11 @@ fn lower_const(
 }
 
 fn lower_ctor(ty_ctx: &TyContext, ty: TyId) -> Func {
-    let Ty::Named {
-        ident,
-        fields,
-        ctor,
-        ..
-    } = ty_ctx.get(ty)
-    else {
+    let Ty::Named { fields, ctor, .. } = ty_ctx.get_ty(ty) else {
         unreachable!("ICE: Attempted to lower constructor for non-named type")
     };
 
-    let mut func = Func::new(*ident, fields.len(), ty);
+    let mut func = Func::new(fields.len(), ty);
     let entry = func.add_block();
 
     let temp = func.add_temp(ty);
@@ -165,9 +144,9 @@ fn lower_ctor(ty_ctx: &TyContext, ty: TyId) -> Func {
 impl<'ext, 'func> LowerInfo<'ext, 'func> {
     fn new(
         hir: &'ext Hir,
-        ty_ctx: &'ext TyContext,
+        ty_ctx: &'ext mut TyContext,
         handler: &'ext ErrorHandler<'ext>,
-        module: ModuleId,
+        def: DefId,
         func: &'func mut Func,
     ) -> Self {
         let block = func.add_block();
@@ -175,10 +154,10 @@ impl<'ext, 'func> LowerInfo<'ext, 'func> {
             hir,
             ty_ctx,
             handler,
-            module,
             var_map: SecondaryMap::new(),
             drop_stack: OrderSet::default(),
             lambda_counter: 0,
+            def,
             func,
             block,
         }
@@ -218,7 +197,7 @@ impl<'ext, 'func> LowerInfo<'ext, 'func> {
         match self.var_map.get(var) {
             Some(var) => *var,
             None => {
-                let info = self.hir.var_info(var);
+                let info = self.hir.var(var);
                 assert!(
                     !info.global,
                     "Variables representing top-level items should not be lowered to MIR locals"

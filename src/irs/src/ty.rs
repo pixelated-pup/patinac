@@ -6,6 +6,7 @@
 use std::{
     cell::RefCell,
     fmt::{self, Display, Formatter},
+    range::Range,
 };
 
 use ena::{
@@ -15,6 +16,7 @@ use ena::{
 use foldhash::fast::RandomState;
 use itertools::Itertools as _;
 use ordermap::{OrderMap, OrderSet};
+use slotmap::{SlotMap, new_key_type};
 
 use ident::Ident;
 
@@ -27,6 +29,8 @@ pub const PTR_SIZE: u32 = 8;
 pub struct TyContext {
     store: OrderSet<Ty, RandomState>,
     unif_table: RefCell<InPlaceUnificationTable<TyId, Vec<VarValue<TyId>>, NoUndo>>,
+    defs: SlotMap<DefId, DefInfo>,
+    main: Option<DefId>,
     int: TyId,
     uint: TyId,
     byte: TyId,
@@ -62,6 +66,8 @@ impl TyContext {
         Self {
             store,
             unif_table,
+            defs: SlotMap::default(),
+            main: None,
             int,
             uint,
             byte,
@@ -73,7 +79,7 @@ impl TyContext {
 
     /// Either interns the given type and returns a new ID for it,
     /// or returns it's existing ID if it's already been interned.
-    pub fn intern(&mut self, ty: Ty) -> TyId {
+    pub fn intern_ty(&mut self, ty: Ty) -> TyId {
         let (idx, exists) = self.store.insert_full(ty);
         if exists {
             TyId(idx.try_into().expect("too many type IDs!"))
@@ -133,7 +139,7 @@ impl TyContext {
     }
 
     /// Returns the type corresponding to the given ID.
-    pub fn get(&self, id: TyId) -> &Ty {
+    pub fn get_ty(&self, id: TyId) -> &Ty {
         let id = self.unif_table.borrow_mut().find(id);
         self.store
             .get_index(id.0 as usize)
@@ -151,7 +157,7 @@ impl TyContext {
     /// # Panics
     /// Panics if the provided type is a [`Ty::Var`] or [`Ty::IntVar`].
     pub fn size_of(&self, ty: TyId) -> u32 {
-        match self.get(ty) {
+        match self.get_ty(ty) {
             Ty::Int | Ty::UInt | Ty::Float => 8,
             Ty::Byte | Ty::Bool => 1,
             Ty::Tuple(elem_tys) => todo!(),
@@ -168,7 +174,7 @@ impl TyContext {
             //     base_size + end_padding
             // }
             Ty::Func(_, _) => PTR_SIZE * 5, // Function, environment, drop, copy, equality.
-            Ty::FuncItem() => 0,
+            Ty::FuncItem(_) => 0,
             Ty::Named {
                 ident,
                 opaque,
@@ -185,7 +191,7 @@ impl TyContext {
     /// # Panics
     /// Panics if the provided type is a [`Ty::Var`] or [`Ty::IntVar`].
     pub fn align_of(&self, ty: TyId) -> u32 {
-        match self.get(ty) {
+        match self.get_ty(ty) {
             Ty::Int | Ty::UInt | Ty::Float | Ty::Byte | Ty::Bool => self.size_of(ty),
             Ty::Tuple(elem_tys) => elem_tys
                 .iter()
@@ -193,7 +199,7 @@ impl TyContext {
                 .max()
                 .unwrap_or(1),
             Ty::Func(_, _) => PTR_SIZE,
-            Ty::FuncItem() => 1,
+            Ty::FuncItem(_) => 1,
             Ty::Named { fields, .. } => fields
                 .iter()
                 .map(|(_, ty)| self.align_of(*ty))
@@ -209,18 +215,58 @@ impl TyContext {
     /// # Panics
     /// Panics if the provided type is a [`Ty::Var`] or [`Ty::IntVar`].
     pub fn is_zst(&self, ty: TyId) -> bool {
-        match self.get(ty) {
+        match self.get_ty(ty) {
             Ty::Int | Ty::UInt | Ty::Float | Ty::Byte | Ty::Bool | Ty::Func(_, _) => false,
             Ty::Tuple(elem_tys) => {
                 elem_tys.is_empty() || elem_tys.iter().all(|ty| self.is_zst(*ty))
             }
-            Ty::FuncItem() => true,
+            Ty::FuncItem(_) => true,
             Ty::Named { fields, .. } => {
                 fields.is_empty() || fields.iter().all(|(_, ty)| self.is_zst(*ty))
             }
             Ty::Var(_) | Ty::IntVar(_) => panic!("Attempted to get size of type variable"),
         }
     }
+}
+
+impl TyContext {
+    /// Adds a definition and returns a new id for it.
+    pub fn add_def(&mut self, def: DefInfo) -> DefId {
+        self.defs.insert(def)
+    }
+
+    /// Returns the information for the given definition.
+    pub fn def(&self, def: DefId) -> &DefInfo {
+        &self.defs[def]
+    }
+
+    /// Returns an iterator over all of the definitions.
+    pub fn defs(&self) -> impl Iterator<Item = DefId> {
+        self.defs.keys()
+    }
+
+    /// Returns the main function, if it exists.
+    pub const fn main(&self) -> Option<DefId> {
+        self.main
+    }
+
+    /// Sets the main function.
+    pub fn set_main(&mut self, main: DefId) {
+        self.main = Some(main);
+    }
+}
+
+new_key_type! {
+    pub struct DefId;
+}
+
+#[derive(Debug)]
+pub struct DefInfo {
+    pub ty: TyId,
+    pub ident: Ident,
+    pub span: Range<u32>,
+    /// The module containing the definition.
+    pub module: ModuleId,
 }
 
 /// An ID representing an interned type. Information about the type can be acquired through [`Hir::ty_kind`].
@@ -268,7 +314,7 @@ pub enum Ty {
     /// A first-class function value, implemented as a closure.
     Func(Vec<Param>, TyId),
     /// The unnameable type of a single function item. Does not exist at runtime.
-    FuncItem(),
+    FuncItem(DefId),
     /// A user-defined type, such as a `record` or `union`.
     Named {
         /// The name of the type.
@@ -320,7 +366,7 @@ pub struct TyDisplay<'ctx>(TyId, &'ctx TyContext);
 impl Display for TyDisplay<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let &TyDisplay(id, ctx) = self;
-        match ctx.get(id) {
+        match ctx.get_ty(id) {
             Ty::Int => "Int".fmt(f),
             Ty::UInt => "UInt".fmt(f),
             Ty::Byte => "Byte".fmt(f),
@@ -334,7 +380,7 @@ impl Display for TyDisplay<'_> {
                 let params = params.iter().map(|param| param.display(ctx)).join(", ");
                 write!(f, "Fn({params}) -> {}", ret_ty.display(ctx))
             }
-            Ty::FuncItem() => todo!(),
+            Ty::FuncItem(def) => todo!(),
             Ty::Named { ident, .. } => ident.fmt(f),
             Ty::Var(id) => write!(f, "?{}", id.0),
             Ty::IntVar(_) => write!(f, "{{int}}"),

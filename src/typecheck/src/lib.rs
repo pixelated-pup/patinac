@@ -38,19 +38,19 @@ impl TypeChecker<'_, '_, '_> {
         for def in self.hir.defs() {
             match &def.kind {
                 DefKind::Const(val) => {
-                    let binding_ty = self.hir.var_info(def.var).ty;
+                    let binding_ty = self.hir.var(def.var).ty;
                     self.unify_expr_ty(*val, binding_ty);
                 }
                 DefKind::Func { body, .. } => {
-                    let Ty::Func(_, ret_ty) = self.ty_ctx.get(self.hir.var_info(def.var).ty) else {
+                    let Ty::Func(_, ret_ty) = self.ty_ctx.get_ty(self.hir.var(def.var).ty) else {
                         unreachable!("function was given non-function type during nameres")
                     };
                     self.unify_expr_ty(*body, *ret_ty);
                 }
             }
         }
-        if let Some(main) = self.hir.main() {
-            let DefKind::Func { body, .. } = &main.kind else {
+        if let Some(main) = self.ty_ctx.main() {
+            let DefKind::Func { body, .. } = &self.hir.def(main).kind else {
                 unreachable!("ICE")
             };
             let unit = self.ty_ctx.unit();
@@ -73,13 +73,13 @@ impl TypeChecker<'_, '_, '_> {
 
     fn unify_ty_ty(&self, lhs: TyId, rhs: TyId, span: Range<u32>, module: ModuleId) {
         fn occurs_check(ty_ctx: &TyContext, ty: TyId, var: TyId) -> bool {
-            match ty_ctx.get(ty) {
+            match ty_ctx.get_ty(ty) {
                 Ty::Int
                 | Ty::UInt
                 | Ty::Byte
                 | Ty::Float
                 | Ty::Bool
-                | Ty::FuncItem()
+                | Ty::FuncItem(_)
                 | Ty::Named { .. } => false,
                 Ty::Tuple(tys) => tys.iter().any(|ty| occurs_check(ty_ctx, *ty, var)),
                 Ty::Func(params, ret_ty) => {
@@ -92,7 +92,7 @@ impl TypeChecker<'_, '_, '_> {
             }
         }
 
-        match (self.ty_ctx.get(lhs), self.ty_ctx.get(rhs)) {
+        match (self.ty_ctx.get_ty(lhs), self.ty_ctx.get_ty(rhs)) {
             (Ty::Int, Ty::Int)
             | (Ty::UInt, Ty::UInt)
             | (Ty::Byte, Ty::Byte)
@@ -129,6 +129,7 @@ impl TypeChecker<'_, '_, '_> {
                     }
                 }
             }
+            (Ty::FuncItem(_), _) | (_, Ty::FuncItem(_)) => todo!(),
             (Ty::Named { .. }, Ty::Named { .. }) if lhs == rhs => {}
             (Ty::IntVar(lhs_var), Ty::IntVar(rhs_var)) | (Ty::Var(lhs_var), Ty::Var(rhs_var)) => {
                 self.ty_ctx.unify(*lhs_var, *rhs_var);
@@ -178,13 +179,13 @@ impl TypeChecker<'_, '_, '_> {
 }
 
 fn check_inferred(ty_ctx: &TyContext, ty: TyId) -> bool {
-    match ty_ctx.get(ty) {
+    match ty_ctx.get_ty(ty) {
         Ty::Int
         | Ty::UInt
         | Ty::Byte
         | Ty::Float
         | Ty::Bool
-        | Ty::FuncItem()
+        | Ty::FuncItem(_)
         | Ty::Named { .. } => true,
         Ty::Tuple(elem_tys) => elem_tys.iter().all(|ty| check_inferred(ty_ctx, *ty)),
         Ty::Func(params, ret_ty) => {

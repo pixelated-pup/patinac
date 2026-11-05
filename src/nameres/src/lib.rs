@@ -13,7 +13,7 @@ use errors::{ErrorHandler, HandledError, Result, TryCollectEager as _};
 use irs::{
     ModuleId, Package,
     ast::{self, Ast, Binding, Import, Pat, PatKind, TyItem, TyItemKind, TyKind},
-    hir::{self, Field, Hir, Param, TyId, VarId, VarInfo},
+    hir::{self, Field, Hir, Param, TyId, Var, VarId},
 };
 
 use crate::{
@@ -82,7 +82,7 @@ impl ResolveInfo<'_, '_> {
                 let Ok(ty) = self.resolve_ty(&impl_.ty) else {
                     continue;
                 };
-                let id = self.hir.add_var(VarInfo {
+                let id = self.hir.add_var(Var {
                     ident: def.ident,
                     mutable: false,
                     global: true,
@@ -107,7 +107,7 @@ impl ResolveInfo<'_, '_> {
             }
         }
         for def in &ast.defs {
-            let id = self.hir.add_var(VarInfo {
+            let id = self.hir.add_var(Var {
                 ident: def.ident,
                 mutable: false,
                 global: true,
@@ -169,7 +169,7 @@ impl ResolveInfo<'_, '_> {
                 let Ok(ty) = self.resolve_ty(&impl_.ty) else {
                     continue;
                 };
-                let id = self.hir.add_var(VarInfo {
+                let id = self.hir.add_var(Var {
                     ident: def.ident,
                     mutable: false,
                     global: true,
@@ -194,7 +194,7 @@ impl ResolveInfo<'_, '_> {
             }
         }
         for def in &ast.defs {
-            let id = self.hir.add_var(VarInfo {
+            let id = self.hir.add_var(Var {
                 ident: def.ident,
                 mutable: false,
                 global: true,
@@ -283,7 +283,7 @@ impl ResolveInfo<'_, '_> {
                         .collect(),
                     Box::new(hir::Ty::Named(id)),
                 );
-                let ctor = self.hir.add_var(VarInfo {
+                let ctor = self.hir.add_var(Var {
                     ident: item.ident,
                     mutable: false,
                     global: true,
@@ -466,7 +466,7 @@ impl ResolveInfo<'_, '_> {
     fn resolve_pat(&mut self, pat: &Pat, mutable: bool, ty: hir::TyId) -> VarId {
         match pat.kind {
             PatKind::Ident(ident) => {
-                let id = self.hir.add_var(VarInfo {
+                let id = self.hir.add_var(Var {
                     ident: ident.span(pat.span),
                     mutable,
                     ty,

@@ -254,7 +254,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     }
 
     fn lower_ty(&self, ty: TyId) -> BasicTypeEnum<'ctx> {
-        let lowered_ty = match self.ty_ctx.get(ty) {
+        let lowered_ty = match self.ty_ctx.get_ty(ty) {
             Ty::Int | Ty::UInt => self.ctx.i64_type().as_basic_type_enum(),
             Ty::Byte => self.ctx.i8_type().as_basic_type_enum(),
             Ty::Float => self.ctx.f64_type().as_basic_type_enum(),
@@ -393,7 +393,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     }
 
     fn build_drop(&self, ty: TyId, place: PointerValue<'ctx>) {
-        match self.ty_ctx.get(ty) {
+        match self.ty_ctx.get_ty(ty) {
             // Trivial types.
             Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => {}
             Ty::Tuple(elem_tys) => {
@@ -414,7 +414,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     }
 
     fn build_copy(&self, ty: TyId, place: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
-        match self.ty_ctx.get(ty) {
+        match self.ty_ctx.get_ty(ty) {
             Ty::Int | Ty::UInt => self
                 .builder
                 .build_load(self.ctx.i64_type(), place, "")
@@ -437,7 +437,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     }
 
     fn build_copy_to(&self, ty: TyId, src: PointerValue<'ctx>, dst: PointerValue<'ctx>) {
-        match self.ty_ctx.get(ty) {
+        match self.ty_ctx.get_ty(ty) {
             Ty::Int | Ty::UInt | Ty::Byte | Ty::Bool | Ty::Float => {
                 let value = self.build_copy(ty, src);
                 self.build_store(ty, value, dst);
@@ -460,7 +460,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     }
 
     fn build_move(&self, ty: TyId, place: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
-        match self.ty_ctx.get(ty) {
+        match self.ty_ctx.get_ty(ty) {
             Ty::Int | Ty::UInt => self
                 .builder
                 .build_load(self.ctx.i64_type(), place, "")
@@ -479,7 +479,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     }
 
     fn build_store(&self, ty: TyId, value: BasicValueEnum<'ctx>, dst: PointerValue<'ctx>) {
-        match self.ty_ctx.get(ty) {
+        match self.ty_ctx.get_ty(ty) {
             Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => {
                 self.builder.build_store(dst, value).unwrap();
             }
@@ -496,7 +496,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         lhs: BasicValueEnum<'ctx>,
         rhs: BasicValueEnum<'ctx>,
     ) -> IntValue<'ctx> {
-        match self.ty_ctx.get(ty) {
+        match self.ty_ctx.get_ty(ty) {
             Ty::Int | Ty::UInt | Ty::Byte | Ty::Bool => self
                 .builder
                 .build_int_compare(
@@ -576,7 +576,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     }
 
     fn mangle_ty(&self, ty: TyId) -> String {
-        match self.ty_ctx.get(ty) {
+        match self.ty_ctx.get_ty(ty) {
             Ty::Int => "i".to_string(),
             Ty::UInt => "u".to_string(),
             Ty::Byte => "h".to_string(),
@@ -613,7 +613,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     }
 
     fn storage_class(&self, ty: TyId) -> StorageClass {
-        match self.ty_ctx.get(ty) {
+        match self.ty_ctx.get_ty(ty) {
             Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => StorageClass::Scalar,
             Ty::Tuple(_) | Ty::Func(_, _) => StorageClass::Indirect,
             Ty::Fields(elem_tys) => {
@@ -632,7 +632,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     }
 
     fn is_trivial(&self, ty: TyId) -> bool {
-        match self.ty_ctx.get(ty) {
+        match self.ty_ctx.get_ty(ty) {
             Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => true,
             Ty::Tuple(elem_tys) => elem_tys.iter().all(|ty| self.is_trivial(*ty)),
             Ty::Func(_, _) => false, // FIXME: Account for non-capturing functions.

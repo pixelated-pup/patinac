@@ -129,8 +129,8 @@ impl ResolveInfo<'_, '_> {
                 let captures = captures
                     .into_iter()
                     .map(|capture| {
-                        let info = self.hir.var_info(capture);
-                        let rebinding = self.hir.add_var(hir::VarInfo {
+                        let info = self.hir.var(capture);
+                        let rebinding = self.hir.add_var(hir::Var {
                             mutable: false,
                             ..info
                         });
@@ -234,7 +234,7 @@ impl ResolveInfo<'_, '_> {
         let expr = self.hir.expr(expr);
         match &expr.kind {
             hir::ExprKind::Var(id) => {
-                let info = self.hir.var_info(*id);
+                let info = self.hir.var(*id);
                 if !info.mutable {
                     self.err(ErrorKind::Mutation(info.ident.ident), expr.span);
                 }
@@ -269,7 +269,7 @@ impl ResolveInfo<'_, '_> {
             ExprKind::Var(path) => {
                 // Unbound variables are either parameters, which don't need capturing, or actually unbound, which will produce an error anyway.
                 if let Ok(id) = self.scopes.resolve_var(path.as_slice())
-                    && !self.hir.var_info(id).global
+                    && !self.hir.var(id).global
                 {
                     captures.insert(id);
                 }

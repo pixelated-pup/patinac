@@ -163,7 +163,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
 
     fn emit_print(&mut self, func: &'mir Func, value: &Value) {
         let ty = self.value_ty(func, value);
-        let format = match self.ty_ctx.get(ty) {
+        let format = match self.ty_ctx.get_ty(ty) {
             Ty::Int => "%lld\n",
             Ty::UInt => "%llu\n",
             Ty::Byte => "%hhu\n",
@@ -372,7 +372,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         callee: BasicValueEnum<'ctx>,
         mut args: Vec<BasicMetadataValueEnum<'ctx>>,
     ) -> Option<BasicValueEnum<'ctx>> {
-        match self.ty_ctx.get(callee_ty) {
+        match self.ty_ctx.get_ty(callee_ty) {
             Ty::Func(params, ret_ty) => {
                 let ty = self.closure_ty();
                 let closure = callee.into_pointer_value();
@@ -387,7 +387,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 let func = self.builder.build_load(self.ptr_ty(), func, "").unwrap();
                 self.build_indirect_call(func_ty, func.into_pointer_value(), &args)
             }
-            Ty::FuncItem() => {
+            Ty::FuncItem(def) => {
                 todo!();
             }
             _ => unreachable!("wrong type for function"),

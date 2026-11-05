@@ -1,10 +1,10 @@
 //! The mid-level intermediate representation of Patina. Lowered from the HIR, and used for code generation.
 
-use slotmap::{SlotMap, new_key_type};
+use slotmap::{SecondaryMap, SlotMap, new_key_type};
 
 use ident::Ident;
 
-use crate::ty::TyId;
+use crate::ty::{DefId, TyId};
 
 /// The mid-level intermediate representation of Patina, a CFG with no nested expressions.
 ///
@@ -18,40 +18,19 @@ use crate::ty::TyId;
 /// - Pattern matching will have been lowered to switching on integers
 #[derive(Debug, Default)]
 pub struct Mir {
-    main: Option<FuncId>,
-    funcs: SlotMap<FuncId, Func>,
+    funcs: SecondaryMap<DefId, Func>,
 }
 
 impl Mir {
-    /// Returns an iterator over all of the functions.
-    pub fn funcs(&self) -> impl Iterator<Item = &Func> {
-        self.funcs.values()
-    }
-
-    /// Adds a function, returning a unique ID for it.
-    pub fn add_func(&mut self, func: Func) -> FuncId {
-        self.funcs.insert(func)
+    /// Adds a function corresponding to the given definition.
+    pub fn add_func(&mut self, def: DefId, func: Func) {
+        self.funcs.insert(def, func);
     }
 
     /// Returns the information for the given function.
-    pub fn func(&self, id: FuncId) -> &Func {
-        &self.funcs[id]
+    pub fn func(&self, def: DefId) -> &Func {
+        &self.funcs[def]
     }
-
-    /// Returns the main function, if it exists.
-    pub const fn main(&self) -> Option<FuncId> {
-        self.main
-    }
-
-    /// Sets the main function.
-    pub fn set_main(&mut self, main: FuncId) {
-        self.main = Some(main);
-    }
-}
-
-new_key_type! {
-    /// An ID representing a function.
-    pub struct FuncId;
 }
 
 /// A function item.
@@ -59,10 +38,6 @@ new_key_type! {
 /// This is the only kind of item in the MIR, as constants are lowered to functions.
 #[derive(Debug)]
 pub struct Func {
-    /// The user-defined name of the function.
-    pub ident: Ident,
-    /// The type of the function.
-    // pub ty: TyId,
     /// The number of parameters that the function has.
     pub param_count: usize,
     /// The return type of the function.
@@ -77,9 +52,8 @@ pub struct Func {
 }
 
 impl Func {
-    pub fn new(ident: Ident, param_count: usize, ret_ty: TyId) -> Self {
+    pub fn new(param_count: usize, ret_ty: TyId) -> Self {
         Self {
-            ident,
             param_count,
             ret_ty,
             locals: SlotMap::default(),
@@ -231,7 +205,7 @@ pub enum Expr {
     /// A closure.
     Closure {
         /// The lifted function representing the closure body.
-        body: FuncId,
+        body: DefId,
         /// The environment, containing the captured values.
         env: Value,
     },
