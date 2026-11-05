@@ -27,6 +27,12 @@ pub const PTR_SIZE: u32 = 8;
 pub struct TyContext {
     store: OrderSet<Ty, RandomState>,
     unif_table: RefCell<InPlaceUnificationTable<TyId, Vec<VarValue<TyId>>, NoUndo>>,
+    int: TyId,
+    uint: TyId,
+    byte: TyId,
+    float: TyId,
+    bool: TyId,
+    unit: TyId,
 }
 
 #[expect(
@@ -34,9 +40,39 @@ pub struct TyContext {
     reason = "All casts are u32 -> usize, and 16-bit platforms are nostd"
 )]
 impl TyContext {
+    pub fn new() -> Self {
+        let mut store = OrderSet::default();
+        let mut unif_table = RefCell::new(InPlaceUnificationTable::new());
+
+        let mut init = |ty| {
+            let (idx, _) = store.insert_full(ty);
+            let key: TyId = unif_table.get_mut().new_key(());
+            assert_eq!(key.0 as usize, idx);
+            key
+        };
+
+        let int = init(Ty::Int);
+        let uint = init(Ty::UInt);
+        let byte = init(Ty::Byte);
+        let float = init(Ty::Float);
+        let bool = init(Ty::Bool);
+        let unit = init(Ty::Tuple(Vec::new()));
+
+        Self {
+            store,
+            unif_table,
+            int,
+            uint,
+            byte,
+            float,
+            bool,
+            unit,
+        }
+    }
+
     /// Either interns the given type and returns a new ID for it,
     /// or returns it's existing ID if it's already been interned.
-    pub fn intern_ty(&mut self, ty: Ty) -> TyId {
+    pub fn intern(&mut self, ty: Ty) -> TyId {
         let (idx, exists) = self.store.insert_full(ty);
         if exists {
             TyId(idx.try_into().expect("too many type IDs!"))
@@ -47,34 +83,34 @@ impl TyContext {
         }
     }
 
-    /// Shorthand for `self.intern_ty(TyKind::Int)`.
-    pub fn int(&mut self) -> TyId {
-        self.intern_ty(Ty::Int)
+    /// Faster than `self.intern_ty(TyKind::Int)`.
+    pub fn int(&self) -> TyId {
+        self.int
     }
 
-    /// Shorthand for `self.intern_ty(TyKind::UInt)`.
-    pub fn uint(&mut self) -> TyId {
-        self.intern_ty(Ty::UInt)
+    /// Faster than `self.intern_ty(TyKind::UInt)`.
+    pub fn uint(&self) -> TyId {
+        self.uint
     }
 
-    /// Shorthand for `self.intern_ty(TyKind::Byte)`.
-    pub fn byte(&mut self) -> TyId {
-        self.intern_ty(Ty::Byte)
+    /// Faster than `self.intern_ty(TyKind::Byte)`.
+    pub fn byte(&self) -> TyId {
+        self.byte
     }
 
-    /// Shorthand for `self.intern_ty(TyKind::Float)`.
-    pub fn float(&mut self) -> TyId {
-        self.intern_ty(Ty::Float)
+    /// Faster than `self.intern_ty(TyKind::Float)`.
+    pub fn float(&self) -> TyId {
+        self.float
     }
 
-    /// Shorthand for `self.intern_ty(TyKind::Bool)`.
-    pub fn bool(&mut self) -> TyId {
-        self.intern_ty(Ty::Bool)
+    /// Faster than `self.intern_ty(TyKind::Bool)`.
+    pub fn bool(&self) -> TyId {
+        self.bool
     }
 
-    /// Shorthand for `self.intern_ty(TyKind::unit())`.
-    pub fn unit(&mut self) -> TyId {
-        self.intern_ty(Ty::unit())
+    /// Faster than `self.intern_ty(TyKind::unit())`.
+    pub fn unit(&self) -> TyId {
+        self.unit
     }
 
     /// Creates a new, distinct type variable and returns it's ID.

@@ -3,14 +3,15 @@ use std::{iter, range::Range};
 use errors::Report;
 use ident::Ident;
 use irs::{
-    hir::{self, ExprId, ExprKind, LitExpr},
-    mir::{self, BlockId, FieldAccess, Func, Item, Place, Terminator, Value},
-    ty::{Ty, TyId},
+    hir::{self, ExprId, ExprKind, LitExpr, VarId},
+    mir::{self, FieldAccess, Item, LocalId, Place, Terminator, Value},
+    ty::{Param, Ty, TyId},
 };
 
 use crate::LowerInfo;
 
 impl LowerInfo<'_, '_> {
+    /// Caller's responsibility to ensure the result of the expression is dropped.
     pub fn lower_as_expr(&mut self, expr_id: ExprId) -> mir::Expr {
         match &self.hir.expr(expr_id).kind {
             &ExprKind::Infix(op, lhs, rhs) => mir::Expr::Infix(
@@ -25,7 +26,7 @@ impl LowerInfo<'_, '_> {
                 params,
                 captures,
                 body,
-            } => todo!(), //self.lower_lambda(expr, params, captures, *body),
+            } => self.lower_lambda(expr_id, params, captures, *body),
 
             ExprKind::Var(_)
             | ExprKind::Lit(_)
@@ -57,7 +58,7 @@ impl LowerInfo<'_, '_> {
                 assert!(self.func.local(place.base).mutable);
                 self.add_stmt(mir::Stmt::Drop(place.clone()));
                 self.lower_into_place(*value, place);
-                mir::Value::Zst
+                mir::Value::Zst(self.ty_ctx.unit());
             }
             ExprKind::For { .. } => todo!("For Loops"),
             ExprKind::Loop(body) => {
@@ -78,7 +79,7 @@ impl LowerInfo<'_, '_> {
             ExprKind::Continue => todo!("Unconditional Control Flow"),
             ExprKind::Return(_) => todo!("Unconditional Control Flow"),
             ExprKind::Print(expr) => {
-                let value = self.lower_as_value(*expr);
+                let value = self.lower_as_value(*expr); // NEEDS DROP
                 self.add_stmt(mir::Stmt::Print(value));
                 Value::Zst
             }
@@ -91,15 +92,20 @@ impl LowerInfo<'_, '_> {
             | ExprKind::MethodCall { .. }
             | ExprKind::Lambda { .. }
             | ExprKind::If { .. }
-            | ExprKind::Block(_) => Value::Move(self.lower_as_place(expr_id)),
+            | ExprKind::Block(_) => {
+                let place = self.lower_as_place(expr_id);
+                self.unstage_drop(place.base);
+                Value::Move(place)
+            }
         }
     }
 
+    /// Handles dropping the returned place if necessary.
     pub fn lower_as_place(&mut self, expr_id: ExprId) -> Place {
         let expr = self.hir.expr(expr_id);
         match &expr.kind {
             ExprKind::Var(var) if !self.hir.var_info(*var).global => {
-                Place::var(self.lower_local(*var))
+                Place::local(self.lower_local(*var))
             }
             ExprKind::Field { base, field } => {
                 let Ty::Named { fields, .. } = self.ty_ctx.get(self.hir.expr(*base).ty) else {
@@ -133,13 +139,16 @@ impl LowerInfo<'_, '_> {
             | ExprKind::Block(_)
             | ExprKind::Print(_) => {
                 let temp = self.func.add_temp(expr.ty);
-                self.lower_into_place(expr_id, Place::var(temp));
-                Place::var(temp)
+                self.lower_into_place(expr_id, Place::local(temp));
+                self.stage_drop(temp);
+                Place::local(temp)
             }
         }
     }
 
     /// Lowers the provided expression, storing it's result in `place`.
+    ///
+    /// Caller's responsibility to ensure that `place` gets dropped.
     ///
     /// This function is guaranteed to only assign to `place` once and to never read from it,
     /// so it can safely be used with a fresh immutable temporary.
@@ -160,14 +169,14 @@ impl LowerInfo<'_, '_> {
                 }
             }
             ExprKind::Call { callee, args } => {
-                let callee = self.lower_as_value(*callee);
+                let callee = self.lower_as_value(*callee); // NEEDS DROP
                 let args = args
                     .iter()
                     .map(|arg| {
                         if arg.mutable {
                             mir::Arg::Place(self.lower_as_place(arg.value))
                         } else {
-                            mir::Arg::Value(self.lower_as_value(arg.value))
+                            mir::Arg::Value(self.lower_as_value(arg.value)) // NEEDS DROP
                         }
                     })
                     .collect();
@@ -278,8 +287,8 @@ impl LowerInfo<'_, '_> {
     fn lower_lambda(
         &mut self,
         expr: ExprId,
-        params: &[hir::VarId],
-        captures: &[(hir::VarId, hir::VarId)],
+        params: &[VarId],
+        captures: &[(VarId, VarId)],
         body: ExprId,
     ) -> mir::Expr {
         // Create a distinct name for the lifted function.
@@ -294,16 +303,17 @@ impl LowerInfo<'_, '_> {
         // Create a type for the environment.
         let capture_tys = captures
             .iter()
-            .map(|var| self.mir.var(*var).ty.clone())
+            .map(|local| self.func.local(*local).ty)
             .collect();
-        let env_ty = mir::Ty::Fields(capture_tys);
+        let env_ty = self.ty_ctx.intern(Ty::Tuple(capture_tys));
 
         // Create the variable representing the lifted function.
-        let mir::Ty::Func(mut param_tys, ret_ty) = self.lower_expr_ty(expr) else {
+        let Ty::Func(mut param_tys, ret_ty) = self.ty_ctx.get(self.hir.expr(expr).ty).clone()
+        else {
             unreachable!("lambda expression with non-function type")
         };
-        param_tys.push(mir::Param {
-            ty: env_ty.clone(),
+        param_tys.push(Param {
+            ty: env_ty,
             mutable: false,
         });
         let func_var = self.mir.add_var(mir::Local {
@@ -366,37 +376,42 @@ impl LowerInfo<'_, '_> {
         };
 
         for stmt in stmts {
-            match stmt {
-                hir::Stmt::Decl { var, value, .. } => {
-                    let local = self.lower_local(*var);
-                    self.lower_into_place(*value, Place::var(local));
-                    locals.push(local);
-                }
-                hir::Stmt::Expr(expr) => {
-                    let place = self.lower_as_place(*expr);
-                    self.add_stmt(mir::Stmt::Drop(place));
-                }
+            if let Some(local) = self.lower_stmt(stmt, None) {
+                locals.push(local);
             }
         }
 
-        match last {
-            hir::Stmt::Decl { var, value, .. } => {
-                let local = self.lower_local(*var);
-                self.lower_into_place(*value, Place::var(local));
-                locals.push(local);
-            }
-            hir::Stmt::Expr(expr) => match place {
-                Some(place) => self.lower_into_place(*expr, place),
-                None => {
-                    let place = self.lower_as_place(*expr);
-                    self.add_stmt(mir::Stmt::Drop(place));
-                }
-            },
+        if let Some(local) = self.lower_stmt(last, place) {
+            locals.push(local);
         }
 
         // Drop all local variables in this block, in reverse order.
         for local in locals.into_iter().rev() {
-            self.add_stmt(mir::Stmt::Drop(Place::var(local)));
+            self.add_stmt(mir::Stmt::Drop(Place::local(local)));
+        }
+    }
+
+    /// Lowers a statement, storing any result in `place`. If `place` is None, the result is instead dropped.
+    /// If the statement was a declaration, `place` is not assigned to and the local is returned.
+    ///
+    /// This function is guaranteed to assign to `place` at most once and to never read from it,
+    /// so it can safely be used with a fresh immutable temporary.
+    fn lower_stmt(&mut self, stmt: &hir::Stmt, place: Option<Place>) -> Option<LocalId> {
+        match stmt {
+            hir::Stmt::Decl { var, value, .. } => {
+                let local = self.lower_local(*var);
+                self.lower_into_place(*value, Place::local(local));
+                self.commit_drops();
+                Some(local)
+            }
+            hir::Stmt::Expr(expr) => {
+                match place {
+                    Some(place) => self.lower_into_place(*expr, place),
+                    None => _ = self.lower_as_place(*expr),
+                }
+                self.commit_drops();
+                None
+            }
         }
     }
 }

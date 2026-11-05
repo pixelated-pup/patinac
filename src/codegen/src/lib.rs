@@ -34,7 +34,10 @@ use inkwell::{
 };
 use slotmap::SecondaryMap;
 
-use irs::mir::{ItemKind, LocalId, Mir, Param, Ty};
+use irs::{
+    mir::{ItemKind, LocalId, Mir, Param, Ty},
+    ty::TyContext,
+};
 
 use crate::layout::{IntSize, LayoutValue, ScalarKind, ScalarLayout, StorageClass};
 pub use config::*;
@@ -46,8 +49,9 @@ pub fn emit(mir: &Mir, opt_level: OptLevel, mode: CodegenMode, target: Target, p
     CodegenState::new(mir, &ctx, target, package_name).emit(opt_level, mode);
 }
 
-struct CodegenState<'mir, 'ctx> {
+struct CodegenState<'mir, 'ty_ctx, 'ctx> {
     mir: &'mir Mir,
+    ty_ctx: &'ty_ctx TyContext,
     ctx: &'ctx Context,
     builder: Builder<'ctx>,
     module: Module<'ctx>,
@@ -56,12 +60,18 @@ struct CodegenState<'mir, 'ctx> {
     vars: SecondaryMap<LocalId, LayoutValue<'mir, 'ctx>>,
 }
 
-impl<'mir, 'ctx> CodegenState<'mir, 'ctx> {
+impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     /// Creates a new [`Codegen`] for a package with the given name.
     ///
     /// # Panics
     /// Panics if the target machine could not be created.
-    fn new(mir: &'mir Mir, ctx: &'ctx Context, target: Target, package_name: &str) -> Self {
+    fn new(
+        mir: &'mir Mir,
+        ty_ctx: &'ty_ctx TyContext,
+        ctx: &'ctx Context,
+        target: Target,
+        package_name: &str,
+    ) -> Self {
         let module = ctx.create_module(package_name);
 
         LLVMTarget::initialize_all(&InitializationConfig::default());
@@ -73,6 +83,7 @@ impl<'mir, 'ctx> CodegenState<'mir, 'ctx> {
 
         Self {
             mir,
+            ty_ctx,
             ctx,
             builder: ctx.create_builder(),
             module,

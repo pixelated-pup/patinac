@@ -3,12 +3,12 @@ use inkwell::{
     values::{BasicValue, BasicValueEnum, FloatValue, IntValue, PointerValue},
 };
 
-use irs::mir::Ty;
+use irs::ty::{Ty, TyId};
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum LayoutValue<'mir, 'ctx> {
     Scalar(ScalarKind<'ctx>, ScalarLayout<'ctx>),
-    Fields(&'mir [Ty], PointerValue<'ctx>),
+    Fields(&'mir [TyId], PointerValue<'ctx>),
     Closure(FunctionType<'ctx>, PointerValue<'ctx>),
     Zst,
 }
@@ -89,7 +89,7 @@ impl<'mir, 'ctx> LayoutValue<'mir, 'ctx> {
         float.into_float_value()
     }
 
-    pub fn as_fields(&self) -> (&'mir [Ty], PointerValue<'ctx>) {
+    pub fn as_fields(&self) -> (&'mir [TyId], PointerValue<'ctx>) {
         match self {
             &Self::Fields(fields, ptr) => (fields, ptr),
             _ => panic!("not a record: {self:?}"),

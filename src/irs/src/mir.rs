@@ -53,10 +53,8 @@ new_key_type! {
 /// An item.
 ///
 /// The only items directly tracked by the MIR are functions and constants,
-/// known as "executable items" in earlier IRs.
-///
-/// All information for user-defined types has been lowered into normal types,
-/// and methods have been fully desugared into regular functions.
+/// known as "definition items" in earlier IRs.
+/// Methods have also been fully desugared into regular functions.
 #[derive(Debug)]
 pub enum Item {
     /// A constant item.
@@ -71,6 +69,8 @@ pub enum Item {
 /// A function item.
 #[derive(Debug)]
 pub struct Func {
+    /// The user-defined name of the function.
+    pub ident: Ident,
     /// The number of parameters that the function has.
     pub param_count: usize,
     /// The return type of the function.
@@ -85,8 +85,9 @@ pub struct Func {
 }
 
 impl Func {
-    pub fn new(param_count: usize, ret_ty: TyId) -> Self {
+    pub fn new(ident: Ident, param_count: usize, ret_ty: TyId) -> Self {
         Self {
+            ident,
             param_count,
             ret_ty,
             locals: SlotMap::default(),
@@ -255,7 +256,7 @@ pub enum Value {
     /// A scalar literal value. The specific kinds of literals are represented by [`LitValue`].
     Lit(LitValue),
     Item(ItemId),
-    Zst,
+    Zst(TyId),
 }
 
 #[derive(Clone, Debug)]
@@ -268,9 +269,9 @@ pub struct Place {
 }
 
 impl Place {
-    pub fn var(var: LocalId) -> Self {
+    pub fn local(local: LocalId) -> Self {
         Self {
-            base: var,
+            base: local,
             accesses: Vec::new(),
         }
     }

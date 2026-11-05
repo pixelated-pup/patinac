@@ -22,7 +22,7 @@ impl TypeChecker<'_, '_, '_> {
             },
             ExprKind::Tuple(exprs) => {
                 let elem_tys = self.infer_exprs(exprs);
-                self.ty_ctx.intern_ty(Ty::Tuple(elem_tys))
+                self.ty_ctx.intern(Ty::Tuple(elem_tys))
             }
             ExprKind::Infix(op, lhs, rhs) => self.infer_expr_infix(*op, *lhs, *rhs),
             ExprKind::Prefix(op, expr) => self.infer_expr_prefix(*op, *expr),
@@ -36,7 +36,7 @@ impl TypeChecker<'_, '_, '_> {
                     })
                     .collect();
                 let ret_ty = self.ty_ctx.fresh_var();
-                let func_ty = self.ty_ctx.intern_ty(Ty::Func(arg_tys, ret_ty));
+                let func_ty = self.ty_ctx.intern(Ty::Func(arg_tys, ret_ty));
                 self.unify_expr_ty(*callee, func_ty);
                 ret_ty
             }
@@ -50,7 +50,7 @@ impl TypeChecker<'_, '_, '_> {
                     })
                     .collect();
                 let ret_ty = self.ty_ctx.fresh_var();
-                let method_ty = self.ty_ctx.intern_ty(Ty::Func(arg_tys, ret_ty));
+                let method_ty = self.ty_ctx.intern(Ty::Func(arg_tys, ret_ty));
                 todo!("Method Resolution");
                 // let Some(field) = self.hir.ty_info(base_id).fields.get(&field_name.ident) else {
                 //     return Err(
@@ -83,7 +83,7 @@ impl TypeChecker<'_, '_, '_> {
                     })
                     .collect();
                 let body_ty = self.infer_expr(*body);
-                self.ty_ctx.intern_ty(Ty::Func(param_tys, body_ty))
+                self.ty_ctx.intern(Ty::Func(param_tys, body_ty))
             }
             ExprKind::Assign { place, value } => {
                 let place_ty = self.infer_expr(*place);
@@ -92,18 +92,14 @@ impl TypeChecker<'_, '_, '_> {
                 self.ty_ctx.unit()
             }
             ExprKind::If { cond, th, el } => {
-                let bool = self.ty_ctx.bool();
-                self.unify_expr_ty(*cond, bool);
+                self.unify_expr_ty(*cond, self.ty_ctx.bool());
                 let th_ty = self.infer_block_expr(th);
                 match el {
                     Some(el) => {
                         let el_ty = self.infer_block_expr(el);
                         self.unify_ty_ty(el_ty, th_ty, el.span, module);
                     }
-                    None => {
-                        let unit = self.ty_ctx.unit();
-                        self.unify_ty_ty(th_ty, unit, th.span, module)
-                    }
+                    None => self.unify_ty_ty(th_ty, self.ty_ctx.unit(), th.span, module),
                 }
                 th_ty
             }
@@ -137,23 +133,20 @@ impl TypeChecker<'_, '_, '_> {
                 int_var
             }
             InfixOp::AddF | InfixOp::SubF | InfixOp::MulF | InfixOp::DivF => {
-                let float = self.ty_ctx.float();
-                self.unify_expr_ty(lhs, float);
-                self.unify_expr_ty(rhs, float);
-                float
+                self.unify_expr_ty(lhs, self.ty_ctx.float());
+                self.unify_expr_ty(rhs, self.ty_ctx.float());
+                self.ty_ctx.float()
             }
             InfixOp::Exp => {
-                let float = self.ty_ctx.float();
-                self.unify_expr_ty(lhs, float);
+                self.unify_expr_ty(lhs, self.ty_ctx.float());
                 let int_var = self.ty_ctx.fresh_int_var();
                 self.unify_expr_ty(rhs, int_var);
-                float
+                self.ty_ctx.float()
             }
             InfixOp::And | InfixOp::Or => {
-                let bool = self.ty_ctx.bool();
-                self.unify_expr_ty(lhs, bool);
-                self.unify_expr_ty(rhs, bool);
-                bool
+                self.unify_expr_ty(lhs, self.ty_ctx.bool());
+                self.unify_expr_ty(rhs, self.ty_ctx.bool());
+                self.ty_ctx.bool()
             }
             InfixOp::Eqq | InfixOp::Neq => {
                 let lhs_ty = self.infer_expr(lhs);
@@ -161,9 +154,8 @@ impl TypeChecker<'_, '_, '_> {
                 self.ty_ctx.bool()
             }
             InfixOp::Gt | InfixOp::Lt | InfixOp::Geq | InfixOp::Leq => {
-                let float = self.ty_ctx.float();
-                self.unify_expr_ty(lhs, float);
-                self.unify_expr_ty(rhs, float);
+                self.unify_expr_ty(lhs, self.ty_ctx.float());
+                self.unify_expr_ty(rhs, self.ty_ctx.float());
                 self.ty_ctx.bool()
             }
         }
@@ -172,14 +164,12 @@ impl TypeChecker<'_, '_, '_> {
     fn infer_expr_prefix(&mut self, op: PrefixOp, expr: ExprId) -> TyId {
         match op {
             PrefixOp::Not => {
-                let bool = self.ty_ctx.bool();
-                self.unify_expr_ty(expr, bool);
-                bool
+                self.unify_expr_ty(expr, self.ty_ctx.bool());
+                self.ty_ctx.bool()
             }
             PrefixOp::Neg => {
-                let float = self.ty_ctx.float();
-                self.unify_expr_ty(expr, float);
-                float
+                self.unify_expr_ty(expr, self.ty_ctx.float());
+                self.ty_ctx.float()
             }
         }
     }

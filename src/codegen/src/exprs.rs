@@ -1,44 +1,142 @@
 use inkwell::{
     FloatPredicate,
+    basic_block::BasicBlock,
     values::{BasicMetadataValueEnum, BasicValue as _, BasicValueEnum, PointerValue},
 };
 
-use irs::mir::{Arg, BlockExpr, Expr, ExprId, InfixOp, LitValue, LocalId, PrefixOp, Stmt, Ty};
+use irs::{
+    mir::{
+        Arg, Block, BlockId, Expr, Func, InfixOp, LitValue, LocalId, PrefixOp, Stmt, Terminator,
+        Value,
+    },
+    ty::{Ty, TyId},
+};
 
 use crate::{
     CodegenState,
     layout::{self, IntSize, LayoutValue, ScalarKind, ScalarLayout, StorageClass},
 };
 
-impl<'mir, 'ctx> CodegenState<'mir, 'ctx> {
-    pub(crate) fn emit_expr(&mut self, expr: ExprId) -> LayoutValue<'mir, 'ctx> {
-        match self.mir.expr(expr) {
-            Expr::Var(id) => self.emit_ident(*id),
-            Expr::Lit(lit) => self.emit_lit(lit),
-            Expr::Construct(field_tys, values) => self.emit_construct(field_tys, values),
-            Expr::Infix(op, lhs, rhs) => self.emit_infix(*op, *lhs, *rhs),
-            Expr::Prefix(op, expr) => self.emit_prefix(*op, *expr),
-            Expr::Field { base, field } => self.emit_field(*base, *field),
-            Expr::Call { func, args, ret_ty } => self.emit_call(*func, args, ret_ty),
-            Expr::Closure { func, captures } => self.emit_closure(*func, captures),
-            Expr::Assign { place, value } => self.emit_assign(*place, *value),
-            Expr::If { ty, cond, th, el } => self.emit_if(ty, *cond, th, el.as_ref()),
-            Expr::Loop(body) => self.emit_loop(body),
-            Expr::Block(stmts) => self.emit_block_expr(stmts),
+impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
+    pub(crate) fn emit_block(
+        &mut self,
+        mir_func: &'mir Func,
+        mir_block: BlockId,
+    ) -> BasicBlock<'ctx> {
+        let mir_block = mir_func.block(mir_block);
+        let llvm_block = self.ctx.append_basic_block(self.curr_function(), "");
+        self.builder.position_at_end(llvm_block);
 
-            Expr::Print(ty, expr) => self.emit_print(ty, *expr),
+        for stmt in &mir_block.stmts {
+            self.emit_stmt(stmt);
+        }
+
+        match mir_block.terminator() {
+            Terminator::Goto(next_block) => {
+                let next_block = self.emit_block(mir_func, *next_block);
+                self.builder.position_at_end(llvm_block);
+                self.builder.build_unconditional_branch(next_block).unwrap();
+            }
+            Terminator::Switch {
+                scrutinee,
+                targets,
+                otherwise,
+            } => {
+                let scrutinee = self.emit_value(scrutinee).as_int();
+
+                let targets: Vec<_> = targets
+                    .iter()
+                    .map(|(value, block)| {
+                        let value = self.ctx.i64_type().const_int(*value, false);
+                        let block = self.emit_block(mir_func, *block);
+                        (value, block)
+                    })
+                    .collect();
+                let otherwise = self.emit_block(mir_func, *otherwise);
+
+                self.builder.position_at_end(llvm_block);
+                self.builder
+                    .build_switch(scrutinee, otherwise, &targets)
+                    .unwrap();
+            }
+            Terminator::Return(value) => {
+                // match layout::storage_class(ret_ty) {
+                //     StorageClass::Zst => self.builder.build_return(None).unwrap(),
+                //     StorageClass::Indirect => {
+                //         let out_ptr = func.get_first_param().unwrap().into_pointer_value();
+                //         self.build_move(body, out_ptr);
+                //         self.builder.build_return(None).unwrap()
+                //     }
+                //     StorageClass::Scalar => {
+                //         self.builder.build_return(Some(&body.as_scalar())).unwrap()
+                //     }
+                // };
+                todo!();
+            }
+            Terminator::Unreachable => {
+                self.builder.build_unreachable().unwrap();
+            }
+        }
+
+        llvm_block
+    }
+
+    pub(crate) fn emit_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Assign { place, expr } => todo!(),
+            Stmt::Call { callee, args, dst } => todo!(),
+            Stmt::Drop(place) => todo!(),
+            Stmt::Print(value) => self.emit_print(value),
         }
     }
 
-    fn emit_print(&mut self, ty: &'mir Ty, expr: ExprId) -> LayoutValue<'mir, 'ctx> {
-        let format = match ty {
+    fn emit_expr(&mut self, expr: &Expr) -> LayoutValue<'mir, 'ctx> {
+        match expr {
+            Expr::Val(value) => self.emit_value(value),
+            Expr::Infix(infix_op, value, value1) => todo!(),
+            Expr::Prefix(prefix_op, value) => todo!(),
+            Expr::Closure { func, captures } => todo!(),
+        }
+    }
+
+    fn emit_value(&mut self, value: &Value) -> LayoutValue<'mir, 'ctx> {
+        match value {
+            Value::Copy(place) => todo!(),
+            Value::Move(place) => todo!(),
+            Value::Lit(lit) => self.emit_lit(lit),
+            Value::Item(item_id) => todo!(),
+            Value::Zst => LayoutValue::Zst,
+        }
+    }
+
+    // pub(crate) fn emit_expr(&mut self, expr: ExprId) -> LayoutValue<'mir, 'ctx> {
+    //     match self.mir.expr(expr) {
+    //         Expr::Var(id) => self.emit_ident(*id),
+    //         Expr::Lit(lit) => self.emit_lit(lit),
+    //         Expr::Construct(field_tys, values) => self.emit_construct(field_tys, values),
+    //         Expr::Infix(op, lhs, rhs) => self.emit_infix(*op, *lhs, *rhs),
+    //         Expr::Prefix(op, expr) => self.emit_prefix(*op, *expr),
+    //         Expr::Field { base, field } => self.emit_field(*base, *field),
+    //         Expr::Call { func, args, ret_ty } => self.emit_call(*func, args, ret_ty),
+    //         Expr::Closure { func, captures } => self.emit_closure(*func, captures),
+    //         Expr::Assign { place, value } => self.emit_assign(*place, *value),
+    //         Expr::If { ty, cond, th, el } => self.emit_if(ty, *cond, th, el.as_ref()),
+    //         Expr::Loop(body) => self.emit_loop(body),
+    //         Expr::Block(stmts) => self.emit_block_expr(stmts),
+
+    //         Expr::Print(ty, expr) => self.emit_print(ty, *expr),
+    //     }
+    // }
+
+    fn emit_print(&mut self, value: &Value) {
+        let ty = match Value {};
+        let format = match self.ty_ctx.get(ty) {
             Ty::Int => "%lld\n",
             Ty::UInt => "%llu\n",
             Ty::Byte => "%hhu\n",
             Ty::Float => "%f\n",
             Ty::Bool => "%hhd\n",
-            Ty::Fields(_) => todo!(),
-            Ty::Func(_, _) => panic!("can't print this type"),
+            _ => todo!(),
         };
         let format = self
             .builder
@@ -46,10 +144,8 @@ impl<'mir, 'ctx> CodegenState<'mir, 'ctx> {
             .unwrap()
             .as_pointer_value();
 
-        let expr = self.emit_expr(expr);
-        self.build_c_call(self.printf(), &[format.into(), expr.as_scalar().into()]);
-
-        LayoutValue::Zst
+        let value = self.emit_value(value);
+        self.build_c_call(self.printf(), &[format.into(), value.as_scalar().into()]);
     }
 
     fn is_place(&self, expr: ExprId) -> bool {
@@ -107,29 +203,6 @@ impl<'mir, 'ctx> CodegenState<'mir, 'ctx> {
             LitValue::Float(value) => LayoutValue::float(self.const_float(*value)),
             LitValue::Bool(value) => LayoutValue::int(IntSize::Bits8, self.const_bool(*value)),
         }
-    }
-
-    fn emit_construct(
-        &mut self,
-        field_tys: &'mir [Ty],
-        values: &[ExprId],
-    ) -> LayoutValue<'mir, 'ctx> {
-        // Unit.
-        if field_tys.is_empty() {
-            return LayoutValue::Zst;
-        }
-
-        let lowered_ty = self.fields_ty(field_tys);
-        let out = self.build_alloca_entry(lowered_ty, "");
-        for (idx, value) in values.iter().enumerate() {
-            let value = self.emit_expr(*value);
-            let ptr = self
-                .builder
-                .build_struct_gep(lowered_ty, out, u32::try_from(idx).unwrap(), "")
-                .unwrap();
-            self.build_move(value, ptr);
-        }
-        LayoutValue::Fields(field_tys, out)
     }
 
     fn emit_infix(&mut self, op: InfixOp, lhs: ExprId, rhs: ExprId) -> LayoutValue<'mir, 'ctx> {
@@ -220,27 +293,6 @@ impl<'mir, 'ctx> CodegenState<'mir, 'ctx> {
                 LayoutValue::float(self.builder.build_float_neg(expr.as_float(), "").unwrap())
             }
         }
-    }
-
-    fn emit_field(&mut self, base: ExprId, field: u32) -> LayoutValue<'mir, 'ctx> {
-        let (base, needs_drop) = if self.is_place(base) {
-            (self.emit_place(base), false)
-        } else {
-            (self.emit_expr(base), true)
-        };
-
-        let (fields, ptr) = base.as_fields();
-        let field_ptr = self
-            .builder
-            .build_struct_gep(self.fields_ty(fields), ptr, field, "")
-            .unwrap();
-
-        let result = self
-            .build_dup(self.layout_indirect(&fields[usize::try_from(field).unwrap()], field_ptr));
-        if needs_drop {
-            self.build_drop(base);
-        }
-        result
     }
 
     fn emit_call(
@@ -414,128 +466,6 @@ impl<'mir, 'ctx> CodegenState<'mir, 'ctx> {
         self.build_drop(place);
         // Move the temporary value into the variable
         self.build_move(value, place.as_pointer());
-        LayoutValue::Zst
-    }
-
-    fn emit_if(
-        &mut self,
-        ty: &'mir Ty,
-        cond: ExprId,
-        th: &BlockExpr,
-        el: Option<&BlockExpr>,
-    ) -> LayoutValue<'mir, 'ctx> {
-        match el {
-            Some(el) => self.emit_if_else(ty, cond, th, el),
-            None => self.emit_if_no_else(cond, th),
-        }
-    }
-
-    fn emit_if_else(
-        &mut self,
-        ty: &'mir Ty,
-        cond: ExprId,
-        th: &BlockExpr,
-        el: &BlockExpr,
-    ) -> LayoutValue<'mir, 'ctx> {
-        let function = self.curr_function();
-
-        // Set up blocks and result value alloc.
-        let result = match layout::storage_class(ty) {
-            StorageClass::Zst => None,
-            StorageClass::Indirect => Some(self.build_alloca_entry(self.ptr_ty(), "if_result")),
-            StorageClass::Scalar => Some(self.build_alloca_entry(self.lower_ty(ty), "if_result")),
-        };
-        let th_block = self.ctx.append_basic_block(function, "then");
-        let el_block = self.ctx.append_basic_block(function, "else");
-        let merge_block = self.ctx.append_basic_block(function, "merge");
-
-        // Branch.
-        let cond = self.emit_expr(cond);
-        self.builder
-            .build_conditional_branch(cond.as_int(), th_block, el_block)
-            .unwrap();
-
-        // Then block.
-        {
-            self.builder.position_at_end(th_block);
-            let th = self.emit_block_expr(th);
-            if let Some(result) = result {
-                self.builder.build_store(result, th.as_value()).unwrap();
-            }
-            self.builder
-                .build_unconditional_branch(merge_block)
-                .unwrap();
-        }
-
-        // Else block.
-        {
-            // Reposition after any sub-blocks of the then block.
-            el_block
-                .move_after(function.get_last_basic_block().unwrap())
-                .unwrap();
-            self.builder.position_at_end(el_block);
-            let el = self.emit_block_expr(el);
-            if let Some(result) = result {
-                self.builder.build_store(result, el.as_value()).unwrap();
-            }
-            self.builder
-                .build_unconditional_branch(merge_block)
-                .unwrap();
-        }
-
-        // Extract result value.
-        {
-            // Reposition after any sub-blocks of the else block.
-            merge_block
-                .move_after(function.get_last_basic_block().unwrap())
-                .unwrap();
-            self.builder.position_at_end(merge_block);
-            result.map_or(LayoutValue::Zst, |result| self.layout_direct(ty, result))
-        }
-    }
-
-    fn emit_if_no_else(&mut self, cond: ExprId, th: &BlockExpr) -> LayoutValue<'mir, 'ctx> {
-        let func = self.curr_function();
-
-        // Append blocks to current function.
-        let th_block = self.ctx.append_basic_block(func, "then");
-        let merge_block = self.ctx.append_basic_block(func, "merge");
-
-        // Branch on the condition.
-        let cond = self.emit_expr(cond);
-        self.builder
-            .build_conditional_branch(cond.as_int(), th_block, merge_block)
-            .unwrap();
-
-        // Emit the then block.
-        self.builder.position_at_end(th_block);
-        let _ = self.emit_block_expr(th);
-        self.builder
-            .build_unconditional_branch(merge_block)
-            .unwrap();
-
-        // Reposition the merge block after any sub-blocks of the then block.
-        merge_block
-            .move_after(func.get_last_basic_block().unwrap())
-            .unwrap();
-        self.builder.position_at_end(merge_block);
-
-        LayoutValue::Zst
-    }
-
-    fn emit_loop(&mut self, body: &BlockExpr) -> LayoutValue<'mir, 'ctx> {
-        let function = self.curr_function();
-
-        let body_block = self.ctx.append_basic_block(function, "body");
-        self.builder.build_unconditional_branch(body_block).unwrap();
-
-        self.builder.position_at_end(body_block);
-        let _ = self.emit_block_expr(body);
-        self.builder.build_unconditional_branch(body_block).unwrap();
-
-        let post_block = self.ctx.append_basic_block(function, "post");
-        self.builder.position_at_end(post_block);
-
         LayoutValue::Zst
     }
 

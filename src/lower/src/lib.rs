@@ -2,8 +2,10 @@
 
 mod exprs;
 
-use std::cmp::Reverse;
+use std::{cmp::Reverse, mem};
 
+use foldhash::fast::RandomState;
+use ordermap::OrderSet;
 use slotmap::{Key as _, SecondaryMap};
 
 use errors::ErrorHandler;
@@ -11,16 +13,20 @@ use ident::Ident;
 use irs::{
     ModuleId,
     hir::{self, DefItem, DefKind, ExprId, Hir, VarId},
-    mir::{self, Block, BlockId, Func, Item, ItemId, Local, LocalId, Mir, Terminator},
-    ty::{Ty, TyContext, TyId},
+    mir::{
+        self, Block, BlockId, FieldAccess, Func, Item, ItemId, Local, LocalId, Mir, Place,
+        Terminator, Value,
+    },
+    ty::{self, Ty, TyContext, TyId},
 };
 
 struct LowerInfo<'ext, 'func> {
     hir: &'ext Hir,
     ty_ctx: &'ext TyContext,
-    handler: ErrorHandler<'ext>,
-    var_map: SecondaryMap<hir::VarId, mir::LocalId>,
+    handler: &'ext ErrorHandler<'ext>,
     module: ModuleId,
+    var_map: SecondaryMap<VarId, LocalId>,
+    drop_stack: OrderSet<LocalId, RandomState>,
     lambda_counter: u32,
     func: &'func mut Func,
     block: BlockId,
@@ -28,14 +34,14 @@ struct LowerInfo<'ext, 'func> {
 
 /// Lowers the provided [`Hir`] into a [`Mir`].
 pub fn lower(hir: &Hir, ty_ctx: &TyContext, handler: ErrorHandler<'_>) -> Mir {
-    // for id in self.hir.tys() {
-    //     self.lower_ctor(id);
-    // }
+    let mut mir = Mir::default();
 
-    // for item in self.hir.defs() {
-    //     let item = self.lower_item(item);
-    //     self.mir.add_item(item);
-    // }
+    //for ty in ty_ctx.
+
+    for item in hir.defs() {
+        let item = lower_item(hir, ty_ctx, &handler, item);
+        mir.add_item(item);
+    }
 
     // if let Some(main) = self.hir.main() {
     //     let main = self.lower_item(main);
@@ -46,19 +52,35 @@ pub fn lower(hir: &Hir, ty_ctx: &TyContext, handler: ErrorHandler<'_>) -> Mir {
     todo!()
 }
 
+fn lower_item(hir: &Hir, ty_ctx: &TyContext, handler: &ErrorHandler<'_>, item: &DefItem) -> Item {
+    match &item.kind {
+        DefKind::Const(expr) => todo!(),
+        DefKind::Func { params, body } => Item::Func(lower_func(
+            hir,
+            ty_ctx,
+            handler,
+            hir.var_info(item.var).ident.ident,
+            params,
+            *body,
+            item.module,
+        )),
+    }
+}
+
 fn lower_func(
     hir: &Hir,
     ty_ctx: &TyContext,
-    handler: ErrorHandler<'_>,
-    params: Vec<VarId>,
+    handler: &ErrorHandler<'_>,
+    ident: Ident,
+    params: &[VarId],
     body: ExprId,
     module: ModuleId,
 ) -> Func {
-    let mut func = Func::new(params.len(), hir.expr(body).ty);
+    let mut func = Func::new(ident, params.len(), hir.expr(body).ty);
 
     // Set up function parameters.
     let mut var_map = SecondaryMap::new();
-    for param in params {
+    for &param in params {
         let info = hir.var_info(param);
         let local = func.add_local(Local {
             ident: Some(info.ident.ident),
@@ -74,8 +96,9 @@ fn lower_func(
         hir,
         ty_ctx,
         handler,
-        var_map,
         module,
+        var_map,
+        drop_stack: OrderSet::default(),
         lambda_counter: 0,
         func: &mut func,
         block: entry,
@@ -84,6 +107,52 @@ fn lower_func(
     // Lower the function body and build the function return.
     let ret_value = builder.lower_as_value(body);
     builder.set_term(mir::Terminator::Return(ret_value));
+
+    func
+}
+
+fn lower_ctor(ty_ctx: &TyContext, ty: TyId) -> Func {
+    let Ty::Named {
+        ident,
+        fields,
+        ctor,
+        ..
+    } = ty_ctx.get(ty)
+    else {
+        unreachable!("ICE: Attempted to lower constructor for non-named type")
+    };
+
+    let mut func = Func::new(*ident, fields.len(), ty);
+    let entry = func.add_block();
+
+    let temp = func.add_temp(ty);
+    for (index, (ident, field_ty)) in fields.iter().enumerate() {
+        // Add the local corresponding to the parameter for this field.
+        let local = func.add_local(Local {
+            ident: Some(*ident),
+            mutable: false,
+            ty: *field_ty,
+        });
+        // Construct the field place.
+        let index = u32::try_from(index).expect("too many fields");
+        let field = Place {
+            base: temp,
+            accesses: vec![FieldAccess {
+                index,
+                ty: *field_ty,
+            }],
+        };
+        // Assign the parameter to the field place.
+        func.add_stmt(
+            entry,
+            mir::Stmt::Assign {
+                place: field,
+                expr: mir::Expr::Val(Value::Copy(Place::local(local))),
+            },
+        );
+    }
+
+    func.block_mut(entry).term = Some(Terminator::Return(Value::Move(Place::local(temp))));
 
     func
 }
@@ -99,6 +168,20 @@ impl LowerInfo<'_, '_> {
 
     fn set_term(&mut self, term: Terminator) {
         self.block_mut().term = Some(term);
+    }
+
+    fn stage_drop(&mut self, local: LocalId) {
+        self.drop_stack.insert(local);
+    }
+
+    fn unstage_drop(&mut self, local: LocalId) {
+        self.drop_stack.remove(&local);
+    }
+
+    fn commit_drops(&mut self) {
+        for local in mem::take(&mut self.drop_stack).into_iter().rev() {
+            self.add_stmt(mir::Stmt::Drop(Place::local(local)));
+        }
     }
 
     fn lower_local(&mut self, var: VarId) -> LocalId {
@@ -129,29 +212,5 @@ impl LowerInfo<'_, '_> {
         );
 
         todo!()
-    }
-
-    fn lower_ctor(&mut self, ty: TyId) {
-        let var = self.lower_local(self.hir.ty_info(ty).ctor);
-
-        let field_tys = self.layout_record_fields(ty);
-        let (params, values) = field_tys
-            .iter()
-            .map(|ty| {
-                let var = self.mir.add_var(Local {
-                    ident: Ident::new("f"),
-                    ty: ty.clone(),
-                    mutable: false,
-                });
-                let expr = self.mir.add_expr(mir::Expr::Var(var));
-                (var, expr)
-            })
-            .unzip();
-        let body = self.mir.add_expr(mir::Expr::Construct(field_tys, values));
-
-        self.mir.add_item(Item {
-            var,
-            kind: ItemKind::Func { params, body },
-        });
     }
 }
