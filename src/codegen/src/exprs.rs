@@ -105,7 +105,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             Value::Move(place) => todo!(),
             Value::Lit(lit) => self.emit_lit(lit),
             Value::Item(item_id) => todo!(),
-            Value::Zst => LayoutValue::Zst,
+            Value::Zst(_) => LayoutValue::Zst,
         }
     }
 

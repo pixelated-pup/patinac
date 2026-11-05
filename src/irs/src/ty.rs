@@ -42,7 +42,8 @@ pub struct TyContext {
 impl TyContext {
     pub fn new() -> Self {
         let mut store = OrderSet::default();
-        let mut unif_table = RefCell::new(InPlaceUnificationTable::new());
+        let mut unif_table: RefCell<InPlaceUnificationTable<TyId, Vec<VarValue<TyId>>, NoUndo>> =
+            todo!(); //RefCell::default();
 
         let mut init = |ty| {
             let (idx, _) = store.insert_full(ty);
