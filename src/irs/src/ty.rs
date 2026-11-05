@@ -168,6 +168,7 @@ impl TyContext {
             //     base_size + end_padding
             // }
             Ty::Func(_, _) => PTR_SIZE * 5, // Function, environment, drop, copy, equality.
+            Ty::FuncItem() => 0,
             Ty::Named {
                 ident,
                 opaque,
@@ -192,6 +193,7 @@ impl TyContext {
                 .max()
                 .unwrap_or(1),
             Ty::Func(_, _) => PTR_SIZE,
+            Ty::FuncItem() => 1,
             Ty::Named { fields, .. } => fields
                 .iter()
                 .map(|(_, ty)| self.align_of(*ty))
@@ -212,6 +214,7 @@ impl TyContext {
             Ty::Tuple(elem_tys) => {
                 elem_tys.is_empty() || elem_tys.iter().all(|ty| self.is_zst(*ty))
             }
+            Ty::FuncItem() => true,
             Ty::Named { fields, .. } => {
                 fields.is_empty() || fields.iter().all(|(_, ty)| self.is_zst(*ty))
             }
@@ -264,6 +267,8 @@ pub enum Ty {
     Tuple(Vec<TyId>),
     /// A first-class function value, implemented as a closure.
     Func(Vec<Param>, TyId),
+    /// The unnameable type of a single function item. Does not exist at runtime.
+    FuncItem(),
     /// A user-defined type, such as a `record` or `union`.
     Named {
         /// The name of the type.
@@ -329,6 +334,7 @@ impl Display for TyDisplay<'_> {
                 let params = params.iter().map(|param| param.display(ctx)).join(", ");
                 write!(f, "Fn({params}) -> {}", ret_ty.display(ctx))
             }
+            Ty::FuncItem() => todo!(),
             Ty::Named { ident, .. } => ident.fmt(f),
             Ty::Var(id) => write!(f, "?{}", id.0),
             Ty::IntVar(_) => write!(f, "{{int}}"),

@@ -98,7 +98,7 @@ pub struct DefItem {
     pub module: ModuleId,
 }
 
-/// The information of an [`ExecItem`] specific to whether it's a constant or function.
+/// The information of an [`DefItem`] specific to whether it's a constant or function.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DefKind {
     /// A constant item.

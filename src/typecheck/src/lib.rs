@@ -74,7 +74,13 @@ impl TypeChecker<'_, '_, '_> {
     fn unify_ty_ty(&self, lhs: TyId, rhs: TyId, span: Range<u32>, module: ModuleId) {
         fn occurs_check(ty_ctx: &TyContext, ty: TyId, var: TyId) -> bool {
             match ty_ctx.get(ty) {
-                Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool | Ty::Named { .. } => false,
+                Ty::Int
+                | Ty::UInt
+                | Ty::Byte
+                | Ty::Float
+                | Ty::Bool
+                | Ty::FuncItem()
+                | Ty::Named { .. } => false,
                 Ty::Tuple(tys) => tys.iter().any(|ty| occurs_check(ty_ctx, *ty, var)),
                 Ty::Func(params, ret_ty) => {
                     occurs_check(ty_ctx, *ret_ty, var)
@@ -173,7 +179,13 @@ impl TypeChecker<'_, '_, '_> {
 
 fn check_inferred(ty_ctx: &TyContext, ty: TyId) -> bool {
     match ty_ctx.get(ty) {
-        Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool | Ty::Named { .. } => true,
+        Ty::Int
+        | Ty::UInt
+        | Ty::Byte
+        | Ty::Float
+        | Ty::Bool
+        | Ty::FuncItem()
+        | Ty::Named { .. } => true,
         Ty::Tuple(elem_tys) => elem_tys.iter().all(|ty| check_inferred(ty_ctx, *ty)),
         Ty::Func(params, ret_ty) => {
             check_inferred(ty_ctx, *ret_ty)
