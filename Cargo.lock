@@ -392,10 +392,8 @@ name = "lower"
 version = "0.1.0"
 dependencies = [
  "errors",
- "foldhash",
  "ident",
  "irs",
- "ordermap",
  "slotmap",
 ]
 

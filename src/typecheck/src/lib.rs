@@ -36,6 +36,7 @@ pub fn type_hir(hir: &Hir, ty_ctx: &mut TyContext, handler: ErrorHandler<'_>) ->
 impl TypeChecker<'_, '_, '_> {
     fn type_hir(&mut self) -> Result<()> {
         for def in self.hir.defs() {
+            let def = self.hir.def(def);
             match &def.kind {
                 DefKind::Const(val) => {
                     let binding_ty = self.hir.var(def.var).ty;

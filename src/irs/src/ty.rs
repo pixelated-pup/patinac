@@ -173,7 +173,7 @@ impl TyContext {
             //     let end_padding = (align - (base_size % align)) % align;
             //     base_size + end_padding
             // }
-            Ty::Func(_, _) => PTR_SIZE * 5, // Function, environment, drop, copy, equality.
+            Ty::Func(_, _) => PTR_SIZE * 4, // Function, environment, drop, copy.
             Ty::FuncItem(_) => 0,
             Ty::Named {
                 ident,
@@ -262,9 +262,7 @@ new_key_type! {
 
 #[derive(Debug)]
 pub struct DefInfo {
-    pub ty: TyId,
     pub ident: Ident,
-    pub span: Range<u32>,
     /// The module containing the definition.
     pub module: ModuleId,
 }

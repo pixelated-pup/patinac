@@ -1,6 +1,6 @@
 use inkwell::{
     IntPredicate,
-    types::{FunctionType, StructType},
+    types::{BasicTypeEnum, FunctionType, StructType},
     values::{BasicValue as _, FunctionValue},
 };
 
@@ -26,16 +26,23 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         self.ctx.bool_type().fn_type(&[ptr, ptr], false)
     }
 
-    pub fn tuple_drop(&self, elem_tys: &[TyId]) -> FunctionValue<'ctx> {}
-
-    pub fn struct_drop(&self, ident: Ident, fields: &OrderMap<Ident, TyId>) -> FunctionValue<'ctx> {
+    pub fn tuple_drop(&self, elem_tys: &[TyId]) -> FunctionValue<'ctx> {
+        let name = format!("{}.drop", self.mangle_tuple(fields));
+        self.fields_drop(elem_tys.iter().copied(), lowered_ty, &name)
     }
 
-    pub fn fields_drop(&self, fields: &[TyId]) -> FunctionValue<'ctx> {
-        let func_name = format!("{}.drop", self.mangle_fields_ty(fields));
+    pub fn struct_drop(&self, name: &str, fields: &OrderMap<Ident, TyId>) -> FunctionValue<'ctx> {
+        self.fields_drop(fields, lowered_ty, name)
+    }
 
+    pub fn fields_drop(
+        &self,
+        fields: impl IntoIterator<Item = TyId>,
+        lowered_ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> FunctionValue<'ctx> {
         // Check if we already built this function
-        if let Some(func) = self.module.get_function(&func_name) {
+        if let Some(func) = self.module.get_function(name) {
             return func;
         }
 
@@ -43,23 +50,18 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         let old_insert_block = self.builder.get_insert_block().unwrap();
 
         // Create the function.
-        let func = self.add_func(&func_name, self.drop_func_ty(), false);
+        let func = self.add_func(name, self.drop_func_ty(), false);
         self.builder
             .position_at_end(self.ctx.append_basic_block(func, "entry"));
-        let ty = self.fields_ty(fields);
-        let out = func.get_nth_param(0).unwrap().into_pointer_value();
+        let record = func.get_nth_param(0).unwrap().into_pointer_value();
 
-        // Drop each non-trivial field.
-        for (idx, field_ty) in fields
-            .iter()
-            .enumerate()
-            .filter(|(_, ty)| !self.is_trivial(**ty))
-        {
+        // Drop each field.
+        for (idx, field_ty) in fields.into_iter().enumerate() {
             let field_ptr = self
                 .builder
-                .build_struct_gep(ty, out, u32::try_from(idx).unwrap(), "fieldptr")
+                .build_struct_gep(lowered_ty, record, u32::try_from(idx).unwrap(), "")
                 .unwrap();
-            self.build_drop(*field_ty, field_ptr);
+            self.build_drop(field_ty, field_ptr);
         }
         self.builder.build_return(None).unwrap();
 
@@ -68,8 +70,8 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         func
     }
 
-    pub fn fields_copy(&self, fields: &[TyId]) -> FunctionValue<'ctx> {
-        let func_name = format!("{}.copy", self.mangle_fields_ty(fields));
+    pub fn fields_copy(&self, ty: TyId, fields: &[TyId]) -> FunctionValue<'ctx> {
+        let func_name = format!("{}.copy", self.mangle_tuple(fields));
 
         // Check if we already built this function
         if let Some(func) = self.module.get_function(&func_name) {
@@ -83,13 +85,13 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         let func = self.add_func(&func_name, self.copy_func_ty(), false);
         self.builder
             .position_at_end(self.ctx.append_basic_block(func, "entry"));
-        let ty = self.fields_ty(fields);
         let dst = func.get_nth_param(0).unwrap().into_pointer_value();
         let src = func.get_nth_param(1).unwrap().into_pointer_value();
 
         if self.all_trivial(fields) {
-            self.build_memcpy(dst, src, &ty);
+            self.build_memcpy(ty, dst, src);
         } else {
+            let ty = self.lower_ty(ty);
             // If the fields are not all trivial, we need to copy each field individually.
             for (idx, field_ty) in fields.iter().enumerate() {
                 let idx = u32::try_from(idx).unwrap();
@@ -113,8 +115,8 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         func
     }
 
-    pub fn fields_equals(&self, fields: &[TyId]) -> FunctionValue<'ctx> {
-        let func_name = format!("{}.equals", self.mangle_fields_ty(fields));
+    pub fn fields_equals(&self, ty: TyId, fields: &[TyId]) -> FunctionValue<'ctx> {
+        let func_name = format!("{}.equals", self.mangle_tuple(fields));
 
         // Check if we already built this function
         if let Some(func) = self.module.get_function(&func_name) {
@@ -128,22 +130,25 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         let func = self.add_func(&func_name, self.equals_func_ty(), false);
         self.builder
             .position_at_end(self.ctx.append_basic_block(func, "entry"));
-        let ty = self.fields_ty(fields);
         let lhs = func.get_nth_param(0).unwrap().into_pointer_value();
         let rhs = func.get_nth_param(1).unwrap().into_pointer_value();
+        let ty = self.lower_ty(ty);
         let ne_block = self.ctx.append_basic_block(func, "ne");
 
         for (idx, field_ty) in fields.iter().enumerate() {
             let idx = u32::try_from(idx).unwrap();
 
-            let lhs = self
-                .builder
-                .build_struct_gep(ty, lhs, idx, "lhsfieldptr")
-                .unwrap();
-            let rhs = self
-                .builder
-                .build_struct_gep(ty, rhs, idx, "rhsfieldptr")
-                .unwrap();
+            let lhs = self.builder.build_struct_gep(ty, lhs, idx, "").unwrap();
+            let rhs = self.builder.build_struct_gep(ty, rhs, idx, "").unwrap();
+
+            let (lhs, rhs) = if self.is_indirect(*field_ty) {
+                (lhs.as_basic_value_enum(), rhs.as_basic_value_enum())
+            } else {
+                let field_ty = self.lower_ty(*field_ty);
+                let lhs = self.builder.build_load(field_ty, lhs, "").unwrap();
+                let rhs = self.builder.build_load(field_ty, rhs, "").unwrap();
+                (lhs, rhs)
+            };
 
             // If the fields are equal, continue to a new block for the next comparison, else branch to the not-equal block
             let eq_block = self.ctx.append_basic_block(func, "eq");
@@ -334,12 +339,7 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         func
     }
 
-    pub(crate) fn closure_copy(
-        &self,
-        name: &str,
-        captures: &[LocalId],
-        env_ty: Option<TyId>,
-    ) -> FunctionValue<'ctx> {
+    pub(crate) fn closure_copy(&self, name: &str, env_ty: Option<TyId>) -> FunctionValue<'ctx> {
         let func_name = format!("{name}.copy");
 
         // Check if we already built this function.
@@ -354,60 +354,34 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         let func = self.add_func(&func_name, self.copy_func_ty(), false);
         self.builder
             .position_at_end(self.ctx.append_basic_block(func, "entry"));
-        // Copy the source into the target.
         let dst = func.get_nth_param(0).unwrap().into_pointer_value();
         let src = func.get_nth_param(1).unwrap().into_pointer_value();
         let ty = self.closure_ty();
-        self.build_memcpy(dst, src, &ty);
-        // Don't need to clone the environment if there isn't one
+
+        // Copy the source into the destination as-is.
+        self.build_memcpy(ty, dst, src);
+
         if let Some(env_ty) = env_ty {
-            todo!();
-            // // Allocate the new target environment
-            // let size = env_ty.size_of().unwrap();
-            // let dst_env = self
-            //     .build_call(self.malloc(), &[size.as_basic_value_enum().into()])
-            //     .unwrap()
-            //     .into_pointer_value();
+            // Allocate the new environment.
+            let dst = self.build_malloc(env_ty);
 
-            // // Get the source environment
-            // let src_env_ptr = self
-            //     .builder
-            //     .build_struct_gep(ty, src, 1, "srcenvptr")
-            //     .unwrap();
-            // let src_env = self
-            //     .builder
-            //     .build_load(self.ptr_ty(), src_env_ptr, "srcenv")
-            //     .unwrap()
-            //     .into_pointer_value();
+            // Get the source environment.
+            let src = self.builder.build_struct_gep(ty, src, 1, "").unwrap();
+            let src = self
+                .builder
+                .build_load(self.ptr_ty(), src, "")
+                .unwrap()
+                .into_pointer_value();
 
-            // if captures
-            //     .iter()
-            //     .all(|id| layout::trivial(&self.mir.var(*id).ty))
-            // {
-            //     // If all of the captures are trivial, we can memcpy the whole environment
-            //     self.build_memcpy(dst_env, src_env, &env_ty);
-            // } else {
-            //     // If some of the captures aren't trivial, we need to copy each of them individually
-            //     for (idx, ty) in captures.iter().map(|id| &self.mir.var(*id).ty).enumerate() {
-            //         let idx = u32::try_from(idx).unwrap();
-            //         let dst_capture = self
-            //             .builder
-            //             .build_struct_gep(env_ty, dst_env, idx, "dstcapture")
-            //             .unwrap();
-            //         let src_capture = self
-            //             .builder
-            //             .build_struct_gep(env_ty, src_env, idx, "srccapture")
-            //             .unwrap();
-            //         self.build_copy_to(self.layout_direct(ty, src_capture), dst_capture);
-            //     }
-            // }
+            // Copy the environment.
+            self.build_copy_to(env_ty, src, dst);
 
-            // // Store the target environment
-            // let dst_env_ptr = self
-            //     .builder
-            //     .build_struct_gep(ty, dst, 1, "dstenvptr")
-            //     .unwrap();
-            // self.builder.build_store(dst_env_ptr, dst_env).unwrap();
+            // Store the new environment.
+            let env_ptr = self
+                .builder
+                .build_struct_gep(ty, dst, 1, "dstenvptr")
+                .unwrap();
+            self.builder.build_store(env_ptr, dst).unwrap();
         }
         self.builder.build_return(None).unwrap();
 

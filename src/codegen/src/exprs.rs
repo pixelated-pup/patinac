@@ -6,11 +6,8 @@ use inkwell::{
 };
 
 use irs::{
-    mir::{
-        Arg, BlockId, Expr, Func, FuncId, InfixOp, LitValue, LocalId, Place, PrefixOp, Stmt,
-        Terminator, Value,
-    },
-    ty::{Ty, TyId},
+    mir::{Arg, BlockId, Expr, Func, InfixOp, LitValue, Place, PrefixOp, Stmt, Terminator, Value},
+    ty::{DefId, Ty, TyId},
 };
 use slotmap::SecondaryMap;
 
@@ -385,41 +382,32 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 // Extract function pointer from closure and call it.
                 let func = self.builder.build_struct_gep(ty, closure, 0, "").unwrap();
                 let func = self.builder.build_load(self.ptr_ty(), func, "").unwrap();
-                self.build_indirect_call(func_ty, func.into_pointer_value(), &args)
+                self.build_indirect_call(
+                    self.func_ty(params, *ret_ty, true),
+                    func.into_pointer_value(),
+                    &args,
+                )
             }
-            Ty::FuncItem(def) => {
-                todo!();
-            }
+            Ty::FuncItem(def) => self.build_call(self.funcs[*def], &args),
             _ => unreachable!("wrong type for function"),
         }
     }
 
-    fn emit_closure(&self, func: &'mir Func, body: FuncId, env: &Value) -> BasicValueEnum<'ctx> {
+    fn emit_closure(&mut self, func: &'mir Func, body: DefId, env: &Value) -> BasicValueEnum<'ctx> {
         // Create the environment, if one is needed
         let (env_ptr, env_ty) = if let Value::Zst(_) = env {
             (self.const_null(), None)
         } else {
             let env_ty = self.value_ty(func, env);
-            let lowered_env_ty = self.lower_ty(env_ty);
-            let env_ptr = self
-                .build_call(
-                    self.malloc(),
-                    &[lowered_env_ty
-                        .size_of()
-                        .unwrap()
-                        .as_basic_value_enum()
-                        .into()],
-                )
-                .unwrap()
-                .into_pointer_value();
+            let env_ptr = self.build_malloc(env_ty);
             let env = self.emit_value(func, env);
             self.build_store(env_ty, env, env_ptr);
             (env_ptr, Some(env_ty))
         };
 
         // Create the final closure
-        let name = self.mir.func(body).ident.str();
-        let func = self.funcs[func];
+        let name = self.ty_ctx.def(body).ident.str();
+        let body = self.funcs[body];
         let ty = self.closure_ty();
         let closure = self.build_alloca_entry(ty, "");
 
@@ -428,7 +416,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             let ptr = self.builder.build_struct_gep(ty, closure, idx, "").unwrap();
             self.builder.build_store(ptr, val).unwrap();
         };
-        store(0, func.as_global_value().as_pointer_value());
+        store(0, body.as_global_value().as_pointer_value());
         store(1, env_ptr);
         store(
             2,
@@ -438,7 +426,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         );
         store(
             3,
-            self.closure_copy(&name, env, env_ty)
+            self.closure_copy(&name, env_ty)
                 .as_global_value()
                 .as_pointer_value(),
         );

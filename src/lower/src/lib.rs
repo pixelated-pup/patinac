@@ -4,23 +4,22 @@ mod exprs;
 
 use std::mem;
 
-use foldhash::fast::RandomState;
-use ordermap::OrderSet;
 use slotmap::SecondaryMap;
 
 use errors::ErrorHandler;
 use irs::{
     hir::{DefKind, ExprId, Hir, VarId},
     mir::{self, Block, BlockId, FieldAccess, Func, Local, LocalId, Mir, Place, Terminator, Value},
-    ty::{DefId, Ty, TyContext, TyId},
+    ty::{DefId, DefInfo, Ty, TyContext, TyId},
 };
 
-struct LowerInfo<'ext, 'func> {
+struct LowerInfo<'ext, 'mir, 'func> {
     hir: &'ext Hir,
     ty_ctx: &'ext mut TyContext,
     handler: &'ext ErrorHandler<'ext>,
+    mir: &'mir mut Mir,
     var_map: SecondaryMap<VarId, LocalId>,
-    drop_stack: OrderSet<LocalId, RandomState>,
+    drop_stack: Vec<LocalId>,
     lambda_counter: u32,
     def: DefId,
     func: &'func mut Func,
@@ -31,26 +30,26 @@ struct LowerInfo<'ext, 'func> {
 pub fn lower(hir: &Hir, ty_ctx: &mut TyContext, handler: ErrorHandler<'_>) -> Mir {
     let mut mir = Mir::default();
 
-    //for ty in ty_ctx.
+    // TODO: Lower ctors
 
     for def in hir.defs() {
-        let func = lower_item(hir, ty_ctx, &handler, def);
+        let func = lower_item(hir, ty_ctx, &handler, &mut mir, def);
         mir.add_func(def, func);
     }
 
-    // if let Some(main) = self.hir.main() {
-    //     let main = self.lower_item(main);
-    //     self.mir.set_main(main);
-    // }
-
-    // self.mir
-    todo!()
+    mir
 }
 
-fn lower_item(hir: &Hir, ty_ctx: &mut TyContext, handler: &ErrorHandler<'_>, def: DefId) -> Func {
+fn lower_item(
+    hir: &Hir,
+    ty_ctx: &mut TyContext,
+    handler: &ErrorHandler<'_>,
+    mir: &mut Mir,
+    def: DefId,
+) -> Func {
     match &hir.def(def).kind {
-        DefKind::Const(expr) => lower_const(hir, ty_ctx, handler, def, *expr),
-        DefKind::Func { params, body } => lower_func(hir, ty_ctx, handler, def, params, *body),
+        DefKind::Const(expr) => lower_const(hir, ty_ctx, handler, mir, def, *expr),
+        DefKind::Func { params, body } => lower_func(hir, ty_ctx, handler, mir, def, params, *body),
     }
 }
 
@@ -58,12 +57,13 @@ fn lower_func(
     hir: &Hir,
     ty_ctx: &mut TyContext,
     handler: &ErrorHandler<'_>,
+    mir: &mut Mir,
     def: DefId,
     params: &[VarId],
     body: ExprId,
 ) -> Func {
     let mut func = Func::new(params.len(), hir.expr(body).ty);
-    let mut builder = LowerInfo::new(hir, ty_ctx, handler, def, &mut func);
+    let mut builder = LowerInfo::new(hir, ty_ctx, handler, mir, def, &mut func);
 
     // Set up function parameters.
     for &param in params {
@@ -87,16 +87,17 @@ fn lower_const(
     hir: &Hir,
     ty_ctx: &mut TyContext,
     handler: &ErrorHandler<'_>,
+    mir: &mut Mir,
     def: DefId,
     expr: ExprId,
 ) -> Func {
     let mut func = Func::new(0, hir.expr(expr).ty);
-    let mut builder = LowerInfo::new(hir, ty_ctx, handler, def, &mut func);
+    let mut builder = LowerInfo::new(hir, ty_ctx, handler, mir, def, &mut func);
 
     // Lower the function body and build the function return.
     // let ret_value = builder.lower_as_value(body);
     // builder.set_term(mir::Terminator::Return(ret_value));
-    todo!();
+    todo!("Constants");
 
     func
 }
@@ -141,11 +142,12 @@ fn lower_ctor(ty_ctx: &TyContext, ty: TyId) -> Func {
     func
 }
 
-impl<'ext, 'func> LowerInfo<'ext, 'func> {
+impl<'ext, 'mir, 'func> LowerInfo<'ext, 'mir, 'func> {
     fn new(
         hir: &'ext Hir,
         ty_ctx: &'ext mut TyContext,
         handler: &'ext ErrorHandler<'ext>,
+        mir: &'mir mut Mir,
         def: DefId,
         func: &'func mut Func,
     ) -> Self {
@@ -154,8 +156,9 @@ impl<'ext, 'func> LowerInfo<'ext, 'func> {
             hir,
             ty_ctx,
             handler,
+            mir,
             var_map: SecondaryMap::new(),
-            drop_stack: OrderSet::default(),
+            drop_stack: Vec::new(),
             lambda_counter: 0,
             def,
             func,
@@ -176,11 +179,7 @@ impl<'ext, 'func> LowerInfo<'ext, 'func> {
     }
 
     fn stage_drop(&mut self, local: LocalId) {
-        self.drop_stack.insert(local);
-    }
-
-    fn unstage_drop(&mut self, local: LocalId) {
-        self.drop_stack.remove(&local);
+        self.drop_stack.push(local);
     }
 
     fn commit_drops(&mut self) {
@@ -191,6 +190,10 @@ impl<'ext, 'func> LowerInfo<'ext, 'func> {
 
     fn unit(&self) -> Value {
         Value::Zst(self.ty_ctx.unit())
+    }
+
+    fn def(&self) -> &DefInfo {
+        self.ty_ctx.def(self.def)
     }
 
     fn lower_local(&mut self, var: VarId) -> LocalId {

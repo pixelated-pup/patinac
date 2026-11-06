@@ -8,6 +8,7 @@
     reason = "A large number of Inkwell functions return Results for error conditions we don't want to recover from"
 )]
 
+mod attrs;
 mod config;
 mod exprs;
 mod runtime;
@@ -17,6 +18,7 @@ use std::fmt::Write as _;
 
 use inkwell::{
     AddressSpace, FloatPredicate, IntPredicate,
+    attributes::Attribute,
     basic_block::BasicBlock,
     builder::Builder,
     context::Context,
@@ -35,8 +37,8 @@ use inkwell::{
 use slotmap::SecondaryMap;
 
 use irs::{
-    mir::{ItemKind, LocalId, Mir},
-    ty::{Param, Ty, TyContext, TyId},
+    mir::{LocalId, Mir},
+    ty::{DefId, Param, Ty, TyContext, TyId},
 };
 
 pub use config::*;
@@ -62,7 +64,7 @@ struct CodegenState<'mir, 'ty_ctx, 'ctx> {
     builder: Builder<'ctx>,
     module: Module<'ctx>,
     target: TargetMachine,
-    funcs: SecondaryMap<LocalId, FunctionValue<'ctx>>,
+    funcs: SecondaryMap<DefId, FunctionValue<'ctx>>,
     vars: SecondaryMap<LocalId, PointerValue<'ctx>>,
 }
 
@@ -102,23 +104,18 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     /// # Panics
     /// Panics if any functions are invalid, or if writing to the output file fails.
     fn emit(&mut self, opt_level: OptLevel, mode: CodegenMode) {
-        for item in self.mir.funcs() {
-            match &item.kind {
-                ItemKind::Const { .. } => todo!("Constants"),
-                ItemKind::Func { .. } => {
-                    let Ty::Func(params, ret_ty) = &self.mir.var(item.var).ty else {
-                        unreachable!("ICE")
-                    };
-                    let name = Self::mangle_name(self.mir.var(item.var).ident.to_string());
-                    let func_ty = self.func_ty(params, ret_ty, false);
-                    let func = self.add_func(&name, func_ty, false);
-                    self.funcs.insert(item.var, func);
-                    self.vars.insert(
-                        item.var,
-                        LayoutValue::func_ptr(func_ty, func.as_global_value().as_pointer_value()),
-                    );
-                }
-            }
+        for def in self.ty_ctx.defs() {
+            let Ty::Func(params, ret_ty) = &self.mir.var(item.var).ty else {
+                unreachable!("ICE")
+            };
+            let name = Self::mangle_name(self.mir.var(item.var).ident.to_string());
+            let func_ty = self.func_ty(params, ret_ty, false);
+            let func = self.add_func(&name, func_ty, false);
+            self.funcs.insert(item.var, func);
+            self.vars.insert(
+                item.var,
+                LayoutValue::func_ptr(func_ty, func.as_global_value().as_pointer_value()),
+            );
         }
 
         // if let Some(main) = self.mir.main() {
@@ -140,43 +137,39 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         //     assert!(func.verify(true));
         // }
 
-        for item in self.mir.funcs() {
-            match &item.kind {
-                ItemKind::Const { .. } => todo!("Constants"),
-                ItemKind::Func(func) => {
-                    let Ty::Func(_, ret_ty) = &self.mir.var(item.var).ty else {
-                        unreachable!("ICE")
-                    };
-                    let llvm_func = self.funcs[item.var];
+        for def in self.ty_ctx.defs() {
+            let func = self.mir.func(def);
+            // let Ty::Func(_, ret_ty) = &self.mir.var(item.var).ty else {
+            //     unreachable!("ICE")
+            // };
+            let llvm_func = self.funcs[item.var];
 
-                    let entry_block = self.ctx.append_basic_block(func, "entry");
-                    self.builder.position_at_end(entry_block);
+            let entry_block = self.ctx.append_basic_block(func, "entry");
+            self.builder.position_at_end(entry_block);
 
-                    // Skip the first argument if it's an out-pointer.
-                    let offset = if self.is_indirect(*ret_ty) { 1 } else { 0 };
-                    let mut args = llvm_func.get_param_iter().skip(offset);
-                    for id in params {
-                        let info = self.mir.var(*id);
-                        // We don't actually pass ZSTs.
-                        if self.ty_ctx.is_zst(info.ty) {
-                            self.vars.insert(*id, LayoutValue::Zst);
-                            continue;
-                        }
-                        let value = args.next().expect("there should be enough args");
-                        todo!();
-                        self.vars.insert(*id, value);
-                    }
-
-                    self.emit_blocks(func);
-
-                    // Clear the parameters to keep the variable map small.
-                    for id in params {
-                        self.vars.remove(*id);
-                    }
-
-                    assert!(llvm_func.verify(true));
+            // Skip the first argument if it's an out-pointer.
+            let offset = if self.is_indirect(func.ret_ty) { 1 } else { 0 };
+            let mut args = llvm_func.get_param_iter().skip(offset);
+            for id in params {
+                let info = self.mir.var(*id);
+                // We don't actually pass ZSTs.
+                if self.ty_ctx.is_zst(info.ty) {
+                    self.vars.insert(*id, LayoutValue::Zst);
+                    continue;
                 }
+                let value = args.next().expect("there should be enough args");
+                todo!();
+                self.vars.insert(*id, value);
             }
+
+            self.emit_blocks(func);
+
+            // Clear the parameters to keep the variable map small.
+            for id in params {
+                self.vars.remove(*id);
+            }
+
+            assert!(llvm_func.verify(true));
         }
 
         self.module.verify().unwrap();
@@ -260,8 +253,8 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             Ty::Float => self.ctx.f64_type().as_basic_type_enum(),
             Ty::Bool => self.ctx.bool_type().as_basic_type_enum(),
             Ty::Fields(fields) => self.fields_ty(fields),
-            // FIXME: Account for non-capturing functions.
             Ty::Func(..) => self.closure_ty(),
+            Ty::FuncItem(_) => panic!("ICE: Tried to lower function item type"),
         };
 
         assert_eq!(
@@ -278,6 +271,29 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         lowered_ty
     }
 
+    fn closure_ty(&self) -> BasicTypeEnum<'ctx> {
+        self.ctx
+            .struct_type(
+                &[
+                    // Function
+                    self.ptr_ty(),
+                    // Environment
+                    self.ptr_ty(),
+                    // Drop
+                    self.ptr_ty(),
+                    // Copy
+                    self.ptr_ty(),
+                ],
+                false,
+            )
+            .as_basic_type_enum()
+    }
+
+    fn fields_ty(&self, fields: impl IntoIterator<Item = TyId>) -> BasicTypeEnum<'ctx> {
+        let field_tys: Vec<_> = fields.into_iter().map(|ty| self.lower_ty(ty)).collect();
+        self.ctx.struct_type(&field_tys, false).as_basic_type_enum()
+    }
+
     fn func_ty(&self, params: &[Param], ret_ty: TyId, env: bool) -> FunctionType<'ctx> {
         let mut param_tys: Vec<_> = params
             .iter()
@@ -292,12 +308,12 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             })
             .collect();
 
-        // Add parameter for environment if necessary
+        // Add parameter for environment if needed.
         if env {
             param_tys.push(self.ptr_ty().into());
         }
 
-        // Add parameter for return out-pointer if needed.
+        // Add parameter for return pointer if needed.
         match self.storage_class(ret_ty) {
             StorageClass::Zst => self.ctx.void_type().fn_type(&param_tys, false),
             StorageClass::Indirect => {
@@ -306,35 +322,6 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             }
             StorageClass::Scalar => self.lower_ty(ret_ty).fn_type(&param_tys, false),
         }
-    }
-
-    fn closure_ty(&self) -> BasicTypeEnum<'ctx> {
-        if let Some(ty) = self.module.get_struct_type("Closure") {
-            return ty.as_basic_type_enum();
-        }
-
-        let ty = self.ctx.opaque_struct_type("Closure");
-        ty.set_body(
-            &[
-                // Function
-                self.ptr_ty(),
-                // Environment
-                self.ptr_ty(),
-                // Drop
-                self.ptr_ty(),
-                // Copy
-                self.ptr_ty(),
-                // Eq
-                self.ptr_ty(),
-            ],
-            false,
-        );
-        ty.as_basic_type_enum()
-    }
-
-    fn fields_ty(&self, fields: &[TyId]) -> BasicTypeEnum<'ctx> {
-        let field_tys: Vec<_> = fields.iter().map(|ty| self.lower_ty(*ty)).collect();
-        self.ctx.struct_type(&field_tys, false).as_basic_type_enum()
     }
 
     fn ptr_ty(&self) -> BasicTypeEnum<'ctx> {
@@ -394,8 +381,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
 
     fn build_drop(&self, ty: TyId, place: PointerValue<'ctx>) {
         match self.ty_ctx.get_ty(ty) {
-            // Trivial types.
-            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => {}
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool | Ty::FuncItem(_) => {} // Trivial types.
             Ty::Tuple(elem_tys) => {
                 self.build_call(self.fields_drop(elem_tys), &[place.into()]);
             }
@@ -432,6 +418,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 self.build_copy_to(ty, place, new_ptr);
                 new_ptr.as_basic_value_enum()
             }
+            Ty::FuncItem(_) => panic!("ICE: Attempted to copy ZST"),
             Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }
@@ -445,7 +432,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             Ty::Tuple(elem_tys) => {
                 self.build_call(self.fields_copy(elem_tys), &[dst.into(), src.into()]);
             }
-            Ty::Func(params, ret_ty) => {
+            Ty::Func(_, _) => {
                 self.build_call(self.any_closure_copy(), &[dst.into(), src.into()]);
             }
             Ty::Named {
@@ -455,6 +442,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 ctor,
                 module,
             } => todo!(),
+            Ty::FuncItem(_) => panic!("ICE: Attempted to copy ZST"),
             Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }
@@ -474,6 +462,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 .build_load(self.ctx.f64_type(), place, "")
                 .unwrap(),
             Ty::Tuple(_) | Ty::Func(_, _) | Ty::Named { .. } => place.as_basic_value_enum(),
+            Ty::FuncItem(_) => panic!("ICE: Attempted to move ZST"),
             Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }
@@ -484,8 +473,9 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 self.builder.build_store(dst, value).unwrap();
             }
             Ty::Tuple(_) | Ty::Func(_, _) | Ty::Named { .. } => {
-                self.build_memcpy(dst, value.into_pointer_value(), &self.lower_ty(ty))
+                self.build_memcpy(ty, dst, value.into_pointer_value())
             }
+            Ty::FuncItem(_) => panic!("ICE: Attempted to store ZST"),
             Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }
@@ -519,10 +509,11 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 .build_call(self.fields_equals(elem_tys), &[lhs.into(), rhs.into()])
                 .unwrap()
                 .into_int_value(),
-            Ty::Func(params, ret_ty) => self
+            Ty::Func(_, _) => self
                 .build_call(self.any_closure_equals(), &[lhs.into(), rhs.into()])
                 .unwrap()
                 .into_int_value(),
+            Ty::FuncItem(_) => self.const_bool(true),
             Ty::Named {
                 ident,
                 opaque,
@@ -544,11 +535,23 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         self.builder.build_unreachable().unwrap();
     }
 
+    fn build_malloc(&self, ty: TyId) -> PointerValue<'ctx> {
+        self.build_call(
+            self.malloc(),
+            &[self.const_uint(self.ty_ctx.size_of(ty).into()).into()],
+        )
+        .unwrap()
+        .into_pointer_value()
+    }
+
     /// # Panics
     /// Panics if the provided type is unsized.
-    fn build_memcpy(&self, dst: PointerValue<'ctx>, src: PointerValue<'ctx>, ty: &dyn BasicType) {
-        let align = self.target.get_target_data().get_abi_alignment(ty);
-        let size = ty.size_of().expect("sized type");
+    fn build_memcpy(&self, ty: TyId, dst: PointerValue<'ctx>, src: PointerValue<'ctx>) {
+        let align = self.ty_ctx.align_of(ty);
+        let size = self
+            .ctx
+            .ptr_sized_int_type(&self.target.get_target_data(), None)
+            .const_int(self.ty_ctx.size_of(ty).into(), false);
         self.builder
             .build_memcpy(dst, align, src, align, size)
             .unwrap();
@@ -582,7 +585,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             Ty::Byte => "h".to_string(),
             Ty::Float => "f".to_string(),
             Ty::Bool => "b".to_string(),
-            Ty::Tuple(elem_tys) => self.mangle_fields_ty(elem_tys),
+            Ty::Tuple(elem_tys) => self.mangle_tuple(elem_tys),
             Ty::Func(params, ret_ty) => {
                 let param_names = params.iter().fold(String::new(), |mut s, p| {
                     let prefix = if p.mutable { "M" } else { "P" };
@@ -591,6 +594,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 });
                 format!("F{param_names}R{}", self.mangle_ty(*ret_ty))
             }
+            Ty::FuncItem(def) => todo!(),
             Ty::Named {
                 ident,
                 opaque,
@@ -602,10 +606,10 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
-    fn mangle_fields_ty(&self, fields: &[TyId]) -> String {
+    fn mangle_tuple(&self, elem_tys: &[TyId]) -> String {
         format!(
             "({})",
-            fields
+            elem_tys
                 .iter()
                 .map(|ty| self.mangle_ty(*ty))
                 .collect::<String>()
@@ -615,9 +619,17 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     fn storage_class(&self, ty: TyId) -> StorageClass {
         match self.ty_ctx.get_ty(ty) {
             Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => StorageClass::Scalar,
-            Ty::Tuple(_) | Ty::Func(_, _) => StorageClass::Indirect,
-            Ty::Fields(elem_tys) => {
+            Ty::Tuple(elem_tys) => {
                 if elem_tys.is_empty() {
+                    StorageClass::Zst
+                } else {
+                    StorageClass::Indirect
+                }
+            }
+            Ty::Func(_, _) => StorageClass::Indirect,
+            Ty::FuncItem(_) => StorageClass::Zst,
+            Ty::Named { fields, .. } => {
+                if fields.is_empty() {
                     StorageClass::Zst
                 } else {
                     StorageClass::Indirect
@@ -633,7 +645,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
 
     fn is_trivial(&self, ty: TyId) -> bool {
         match self.ty_ctx.get_ty(ty) {
-            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => true,
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool | Ty::FuncItem(_) => true,
             Ty::Tuple(elem_tys) => elem_tys.iter().all(|ty| self.is_trivial(*ty)),
             Ty::Func(_, _) => false, // FIXME: Account for non-capturing functions.
             Ty::Named { fields, .. } => fields.values().all(|ty| self.is_trivial(*ty)),

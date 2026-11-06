@@ -1,4 +1,4 @@
-use std::{fmt::Display, range::Range};
+use std::range::Range;
 
 use errors::Report;
 use ident::Ident;
@@ -10,7 +10,7 @@ use irs::{
 
 use crate::LowerInfo;
 
-impl LowerInfo<'_, '_> {
+impl LowerInfo<'_, '_, '_> {
     /// Caller's responsibility to ensure the result of the expression is dropped.
     pub fn lower_as_expr(&mut self, expr_id: ExprId) -> mir::Expr {
         match &self.hir.expr(expr_id).kind {
@@ -30,7 +30,7 @@ impl LowerInfo<'_, '_> {
                 params,
                 captures,
                 body,
-            } => self.lower_lambda(expr_id, params, captures, *body),
+            } => self.lower_lambda(params, captures, *body),
 
             ExprKind::Var(_)
             | ExprKind::Lit(_)
@@ -51,13 +51,11 @@ impl LowerInfo<'_, '_> {
         }
     }
 
-    /// Caller's responsibility to ensure the result of the value is dropped.
+    /// Handles dropping temporaries.
     pub fn lower_as_value(&mut self, expr_id: ExprId) -> Value {
         let expr = self.hir.expr(expr_id);
         match &expr.kind {
-            ExprKind::Var(_) | ExprKind::Field { .. } if self.ty_ctx.is_zst(expr.ty) => {
-                Value::Zst(expr.ty)
-            }
+            ExprKind::Var(_) if self.ty_ctx.is_zst(expr.ty) => Value::Zst(expr.ty),
             ExprKind::Lit(lit) => Value::Lit(self.lower_lit(lit, expr.span, expr.ty)),
             ExprKind::Assign { place, value } => {
                 let place = self.lower_as_place(*place);
@@ -85,7 +83,7 @@ impl LowerInfo<'_, '_> {
             ExprKind::Continue => todo!("Unconditional Control Flow"),
             ExprKind::Return(_) => todo!("Unconditional Control Flow"),
             ExprKind::Print(expr) => {
-                let value = self.lower_as_value(*expr); // NEEDS DROP
+                let value = self.lower_as_value(*expr);
                 self.add_stmt(mir::Stmt::Print(value));
                 self.unit()
             }
@@ -100,8 +98,11 @@ impl LowerInfo<'_, '_> {
             | ExprKind::If { .. }
             | ExprKind::Block(_) => {
                 let place = self.lower_as_place(expr_id);
-                self.unstage_drop(place.base);
-                Value::Move(place)
+                if self.ty_ctx.is_zst(expr.ty) {
+                    Value::Zst(expr.ty)
+                } else {
+                    Value::Move(place)
+                }
             }
         }
     }
@@ -117,12 +118,12 @@ impl LowerInfo<'_, '_> {
                 let Ty::Named { fields, .. } = self.ty_ctx.get_ty(self.hir.expr(*base).ty) else {
                     unreachable!("field access of non-record type")
                 };
-                let mut place = self.lower_as_place(*base);
                 let index = fields
                     .get_index_of(&field.ident)
                     .expect("ICE: Missing Field")
                     .try_into()
                     .expect("ICE: Too Many Fields");
+                let mut place = self.lower_as_place(*base);
                 place.accesses.push(FieldAccess { index, ty: expr.ty });
                 place
             }
@@ -207,14 +208,14 @@ impl LowerInfo<'_, '_> {
                 self.block = merge_block;
             }
             ExprKind::Call { callee, args } => {
-                let callee = self.lower_as_value(*callee); // NEEDS DROP
+                let callee = self.lower_as_value(*callee);
                 let args = args
                     .iter()
                     .map(|arg| {
                         if arg.mutable {
                             mir::Arg::Place(self.lower_as_place(arg.value))
                         } else {
-                            let value = self.lower_as_value(arg.value); // NEEDS DROP
+                            let value = self.lower_as_value(arg.value);
                             mir::Arg::Value(value)
                         }
                     })
@@ -284,7 +285,7 @@ impl LowerInfo<'_, '_> {
     fn lower_lit(&self, lit: &LitExpr, span: Range<u32>, ty: TyId) -> mir::LitValue {
         let warn = |msg| {
             self.handler
-                .report(Report::warning(msg), span, self.ty_ctx.def(self.def).module);
+                .report(Report::warning(msg), span, self.def().module);
         };
         match lit {
             &LitExpr::Int(value) => match self.ty_ctx.get_ty(ty) {
@@ -317,13 +318,7 @@ impl LowerInfo<'_, '_> {
         }
     }
 
-    fn lower_lambda(
-        &mut self,
-        expr: ExprId,
-        params: &[VarId],
-        captures: &[VarId],
-        body: ExprId,
-    ) -> mir::Expr {
+    fn lower_lambda(&mut self, params: &[VarId], captures: &[VarId], body: ExprId) -> mir::Expr {
         // Create a type for the environment.
         let capture_tys = captures
             .iter()
@@ -351,45 +346,29 @@ impl LowerInfo<'_, '_> {
             env.accesses.pop();
         }
 
-        // let Ty::Func(mut param_tys, ret_ty) = self.ty_ctx.get(self.hir.expr(expr).ty).clone()
-        // else {
-        //     unreachable!("lambda expression with non-function type")
-        // };
-        // param_tys.push(Param {
-        //     ty: env_ty,
-        //     mutable: false,
-        // });
-
         // Create a distinct name for the lifted function.
-        let func_name = format!(
-            "_{}::closure{}",
-            self.ty_ctx.def(self.def).ident,
-            self.lambda_counter
-        );
+        let func_name = format!("_{}::closure{}", self.def().ident, self.lambda_counter);
         self.lambda_counter += 1;
 
+        // Construct the lifted function.
         let mut body_func = Func::new(params.len() + 1, self.hir.expr(body).ty);
-        let def = self.ty_ctx.add_def(DefInfo { ident: Ident });
+        let def = self.ty_ctx.add_def(DefInfo {
+            ident: Ident::new(&func_name),
+            module: self.def().module,
+        });
         let mut builder = LowerInfo::new(
             self.hir,
             self.ty_ctx,
             self.handler,
-            self.module,
+            self.mir,
+            def,
             &mut body_func,
         );
-        // Create the variable representing the lifted function.
         builder.lift_lambda_body(params, captures, body, env_ty);
-
-        // self.mir.add_item(Func {
-        //     var: func_var,
-        //     kind: ItemKind::Func {
-        //         params: param_vars,
-        //         body,
-        //     },
-        // });
+        self.mir.add_func(def, body_func);
 
         mir::Expr::Closure {
-            body: body_func,
+            body: def,
             env: Value::Move(env),
         }
     }

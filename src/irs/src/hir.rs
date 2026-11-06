@@ -31,8 +31,8 @@ impl Hir {
     }
 
     /// Returns an iterator over all of the definitions.
-    pub fn defs(&self) -> impl Iterator<Item = &DefItem> {
-        self.defs.values()
+    pub fn defs(&self) -> impl Iterator<Item = DefId> {
+        self.defs.keys()
     }
 }
 
