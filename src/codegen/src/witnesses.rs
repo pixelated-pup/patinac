@@ -1,13 +1,10 @@
 use inkwell::{
     IntPredicate,
-    types::{BasicTypeEnum, FunctionType, StructType},
+    types::{BasicType, FunctionType},
     values::{BasicValue as _, FunctionValue},
 };
 
-use irs::{
-    mir::LocalId,
-    ty::{Ty, TyId},
-};
+use irs::ty::TyId;
 
 use crate::CodegenState;
 
@@ -26,13 +23,13 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         self.ctx.bool_type().fn_type(&[ptr, ptr], false)
     }
 
-    pub fn tuple_drop(&self, elem_tys: &[TyId]) -> FunctionValue<'ctx> {
+    pub fn tuple_drop(&mut self, elem_tys: &[TyId]) -> FunctionValue<'ctx> {
         let name = self.mangle_tuple(fields);
         self.fields_drop(elem_tys.iter().copied(), lowered_ty, &name)
     }
 
     pub fn struct_drop(
-        &self,
+        &mut self,
         name: &str,
         fields: impl IntoIterator<Item = TyId>,
     ) -> FunctionValue<'ctx> {
@@ -40,7 +37,7 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
     }
 
     pub fn fields_drop(
-        &self,
+        &mut self,
         ty: TyId,
         ty_name: &str,
         fields: impl IntoIterator<Item = TyId>,
@@ -59,11 +56,11 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         let func = self.add_func(&name, self.drop_func_ty(), false);
         self.builder
             .position_at_end(self.ctx.append_basic_block(func, "entry"));
-        let record = func.get_nth_param(0).unwrap().into_pointer_value();
+        let base = func.get_nth_param(0).unwrap().into_pointer_value();
 
         // Drop each field.
         for (idx, field_ty) in fields.into_iter().enumerate() {
-            let field_ptr = self.build_field(ty, base, u32::try_from(idx).unwrap());
+            let field_ptr = self.build_field(ty, base, idx);
             self.build_drop(field_ty, field_ptr);
         }
         self.builder.build_return(None).unwrap();
@@ -73,7 +70,7 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         func
     }
 
-    pub fn fields_copy(&self, ty: TyId, fields: &[TyId]) -> FunctionValue<'ctx> {
+    pub fn fields_copy(&mut self, ty: TyId, fields: &[TyId]) -> FunctionValue<'ctx> {
         let func_name = format!("{}.copy", self.mangle_tuple(fields));
 
         // Check if we already built this function
@@ -96,8 +93,6 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         } else {
             // If the fields aren't all trivial, we need to copy each one individually.
             for (idx, field_ty) in fields.iter().enumerate() {
-                let idx = u32::try_from(idx).unwrap();
-
                 let dst = self.build_field(ty, dst, idx);
                 let src = self.build_field(ty, src, idx);
 
@@ -111,7 +106,7 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         func
     }
 
-    pub fn fields_equals(&self, ty: TyId, fields: &[TyId]) -> FunctionValue<'ctx> {
+    pub fn fields_equals(&mut self, ty: TyId, fields: &[TyId]) -> FunctionValue<'ctx> {
         let func_name = format!("{}.equals", self.mangle_tuple(fields));
 
         // Check if we already built this function
@@ -131,8 +126,6 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         let ne_block = self.ctx.append_basic_block(func, "ne");
 
         for (idx, field_ty) in fields.iter().enumerate() {
-            let idx = u32::try_from(idx).unwrap();
-
             let lhs = self.build_field(ty, lhs, idx);
             let rhs = self.build_field(ty, rhs, idx);
 
@@ -262,35 +255,34 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         let func = self.add_func(func_name, self.equals_func_ty(), false);
         self.builder
             .position_at_end(self.ctx.append_basic_block(func, "entry"));
-        let lhs = func.get_nth_param(0).unwrap();
-        let rhs = func.get_nth_param(1).unwrap();
-        let equals_func = self
+        let lhs = func.get_nth_param(0).unwrap().into_pointer_value();
+        let rhs = func.get_nth_param(1).unwrap().into_pointer_value();
+
+        // Load the function pointers, which are stored first in the closures.
+        let lhs_func = self
             .builder
-            .build_struct_gep(self.closure_ty(), lhs.into_pointer_value(), 4, "equalsfn")
-            .unwrap();
-        let equals_func = self
-            .builder
-            .build_load(self.ptr_ty(), equals_func, "equalsfn")
-            .unwrap();
-        let result = self
-            .builder
-            .build_indirect_call(
-                self.equals_func_ty(),
-                equals_func.into_pointer_value(),
-                &[lhs.into(), rhs.into()],
-                "",
-            )
+            .build_load(self.ptr_ty(), lhs, "")
             .unwrap()
-            .try_as_basic_value()
-            .unwrap_basic();
-        self.builder.build_return(Some(&result)).unwrap();
+            .into_pointer_value();
+        let rhs_func = self
+            .builder
+            .build_load(self.ptr_ty(), rhs, "")
+            .unwrap()
+            .into_pointer_value();
+
+        // Test whether the function pointers are equal.
+        let eq = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, lhs_func, rhs_func, "")
+            .unwrap();
+        self.builder.build_return(Some(&eq)).unwrap();
 
         self.builder.position_at_end(old_insert_block);
 
         func
     }
 
-    pub(crate) fn closure_drop(&self, name: &str, env_ty: Option<TyId>) -> FunctionValue<'ctx> {
+    pub(crate) fn closure_drop(&mut self, name: &str, env_ty: Option<TyId>) -> FunctionValue<'ctx> {
         let func_name = format!("{name}.drop");
 
         // Check if we already built this function
@@ -334,7 +326,7 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         func
     }
 
-    pub(crate) fn closure_copy(&self, name: &str, env_ty: Option<TyId>) -> FunctionValue<'ctx> {
+    pub(crate) fn closure_copy(&mut self, name: &str, env_ty: Option<TyId>) -> FunctionValue<'ctx> {
         let func_name = format!("{name}.copy");
 
         // Check if we already built this function.
@@ -354,71 +346,32 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         let ty = self.closure_ty();
 
         // Copy the source into the destination as-is.
-        self.build_memcpy(ty, dst, src);
+        let align = self.target.get_target_data().get_abi_alignment(&ty);
+        let size = ty.size_of().unwrap();
+        self.builder
+            .build_memcpy(dst, align, src, align, size)
+            .unwrap();
 
         if let Some(env_ty) = env_ty {
             // Allocate the new environment.
-            let dst = self.build_malloc(env_ty);
+            let dst_env = self.build_malloc(env_ty);
 
             // Get the source environment.
-            let src = self.builder.build_struct_gep(ty, src, 1, "").unwrap();
-            let src = self
+            let src_env = self.builder.build_struct_gep(ty, src, 1, "").unwrap();
+            let src_env = self
                 .builder
-                .build_load(self.ptr_ty(), src, "")
+                .build_load(self.ptr_ty(), src_env, "")
                 .unwrap()
                 .into_pointer_value();
 
             // Copy the environment.
-            self.build_copy_to(env_ty, src, dst);
+            self.build_copy_to(env_ty, src_env, dst_env);
 
             // Store the new environment.
-            let env_ptr = self
-                .builder
-                .build_struct_gep(ty, dst, 1, "dstenvptr")
-                .unwrap();
-            self.builder.build_store(env_ptr, dst).unwrap();
+            let env_ptr = self.builder.build_struct_gep(ty, dst, 1, "").unwrap();
+            self.builder.build_store(env_ptr, dst_env).unwrap();
         }
         self.builder.build_return(None).unwrap();
-
-        self.builder.position_at_end(old_insert_block);
-
-        func
-    }
-
-    pub(crate) fn closure_equals(&self, name: &str) -> FunctionValue<'ctx> {
-        let func_name = format!("{name}.equals");
-
-        // Check if we already built this function
-        if let Some(func) = self.module.get_function(&func_name) {
-            return func;
-        }
-
-        // Save the builder's current insertion block to restore at the end
-        let old_insert_block = self.builder.get_insert_block().unwrap();
-
-        // Create the equality function
-        let func = self.add_func(&func_name, self.equals_func_ty(), false);
-        self.builder
-            .position_at_end(self.ctx.append_basic_block(func, "entry"));
-        let lhs = func.get_nth_param(0).unwrap().into_pointer_value();
-        let rhs = func.get_nth_param(1).unwrap().into_pointer_value();
-        // Load the function pointers, which are stored first in the closures.
-        let lhs_fn = self
-            .builder
-            .build_load(self.ptr_ty(), lhs, "")
-            .unwrap()
-            .into_pointer_value();
-        let rhs_fn = self
-            .builder
-            .build_load(self.ptr_ty(), rhs, "")
-            .unwrap()
-            .into_pointer_value();
-        // Test whether the function pointers are equal.
-        let eq = self
-            .builder
-            .build_int_compare(IntPredicate::EQ, lhs_fn, rhs_fn, "")
-            .unwrap();
-        self.builder.build_return(Some(&eq)).unwrap();
 
         self.builder.position_at_end(old_insert_block);
 

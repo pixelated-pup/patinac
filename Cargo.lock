@@ -92,6 +92,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 name = "codegen"
 version = "0.1.0"
 dependencies = [
+ "foldhash",
  "inkwell",
  "irs",
  "slotmap",
@@ -152,13 +153,6 @@ name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
-
-[[package]]
-name = "ds"
-version = "0.1.0"
-dependencies = [
- "derive_more",
-]
 
 [[package]]
 name = "either"

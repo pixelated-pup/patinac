@@ -182,7 +182,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         let mut ty = func.local(place.base).ty;
 
         for access in &place.accesses {
-            base = self.build_field(ty, access.index);
+            base = self.build_field(ty, base, access.idx);
             ty = access.ty;
         }
 
@@ -401,37 +401,31 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             (env_ptr, Some(env_ty))
         };
 
-        // Create the final closure
+        // Set up the closure.
         let name = self.ty_ctx.def(body).ident.str();
         let body = self.funcs[body];
         let ty = self.closure_ty();
         let closure = self.build_alloca(ty, "");
 
+        // Create the witness functions.
+        let drop = self
+            .closure_drop(&name, env_ty)
+            .as_global_value()
+            .as_pointer_value();
+        let copy = self
+            .closure_copy(&name, env_ty)
+            .as_global_value()
+            .as_pointer_value();
+
         // Store everything into the closure, emitting the witness functions along the way.
-        let store = |idx, val| {
-            let ptr = self.builder.build_struct_gep(ty, closure, idx, "").unwrap();
-            self.builder.build_store(ptr, val).unwrap();
+        let store = |this: &Self, idx, val| {
+            let ptr = this.builder.build_struct_gep(ty, closure, idx, "").unwrap();
+            this.builder.build_store(ptr, val).unwrap();
         };
-        store(0, body.as_global_value().as_pointer_value());
-        store(1, env_ptr);
-        store(
-            2,
-            self.closure_drop(&name, env_ty)
-                .as_global_value()
-                .as_pointer_value(),
-        );
-        store(
-            3,
-            self.closure_copy(&name, env_ty)
-                .as_global_value()
-                .as_pointer_value(),
-        );
-        store(
-            4,
-            self.closure_equals(&name)
-                .as_global_value()
-                .as_pointer_value(),
-        );
+        store(self, 0, body.as_global_value().as_pointer_value());
+        store(self, 1, env_ptr);
+        store(self, 2, drop);
+        store(self, 3, copy);
 
         closure.as_basic_value_enum()
     }

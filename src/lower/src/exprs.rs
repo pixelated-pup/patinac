@@ -129,7 +129,10 @@ impl LowerInfo<'_, '_, '_> {
                     .try_into()
                     .expect("ICE: Too Many Fields");
                 let mut place = self.lower_as_place(*base);
-                place.accesses.push(FieldAccess { index, ty: expr.ty });
+                place.accesses.push(FieldAccess {
+                    idx: index,
+                    ty: expr.ty,
+                });
                 place
             }
             ExprKind::Lit(_)
@@ -170,7 +173,7 @@ impl LowerInfo<'_, '_, '_> {
                 for (index, elem) in elems.iter().enumerate() {
                     let ty = self.hir.expr(*elem).ty;
                     place.accesses.push(FieldAccess {
-                        index: index.try_into().expect("tuple too large"),
+                        idx: index.try_into().expect("tuple too large"),
                         ty,
                     });
                     self.lower_into_place(*elem, place.clone());
@@ -337,7 +340,7 @@ impl LowerInfo<'_, '_, '_> {
                 continue;
             }
             env.accesses.push(FieldAccess {
-                index: index.try_into().expect("tuple too large"),
+                idx: index.try_into().expect("tuple too large"),
                 ty,
             });
             self.add_stmt(mir::Stmt::Assign {
@@ -406,7 +409,7 @@ impl LowerInfo<'_, '_, '_> {
                 continue;
             }
             env.accesses.push(FieldAccess {
-                index: index.try_into().expect("tuple too large"),
+                idx: index.try_into().expect("tuple too large"),
                 ty,
             });
             self.add_stmt(mir::Stmt::Assign {

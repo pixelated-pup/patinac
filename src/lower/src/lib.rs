@@ -111,7 +111,7 @@ fn lower_ctor(ty_ctx: &TyContext, ty: TyId) -> Func {
     let entry = func.add_block();
 
     let temp = func.add_temp(ty);
-    for (index, (ident, field_ty)) in fields.iter().enumerate() {
+    for (idx, (ident, field_ty)) in fields.iter().enumerate() {
         // Add the local corresponding to the parameter for this field.
         let local = func.add_local(Local {
             ident: Some(*ident),
@@ -119,13 +119,9 @@ fn lower_ctor(ty_ctx: &TyContext, ty: TyId) -> Func {
             ty: *field_ty,
         });
         // Construct the field place.
-        let index = u32::try_from(index).expect("too many fields");
         let field = Place {
             base: temp,
-            accesses: vec![FieldAccess {
-                index,
-                ty: *field_ty,
-            }],
+            accesses: vec![FieldAccess { idx, ty: *field_ty }],
         };
         // Assign the parameter to the field place.
         func.add_stmt(

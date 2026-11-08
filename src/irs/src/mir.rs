@@ -244,7 +244,7 @@ impl Place {
 
 #[derive(Clone, Copy, Debug)]
 pub struct FieldAccess {
-    pub index: u32,
+    pub idx: usize,
     pub ty: TyId,
 }
 

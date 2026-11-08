@@ -16,6 +16,7 @@ mod witnesses;
 
 use std::fmt::Write as _;
 
+use foldhash::{HashMap, HashMapExt as _};
 use inkwell::{
     AddressSpace, FloatPredicate, IntPredicate,
     attributes::Attribute,
@@ -64,7 +65,7 @@ struct CodegenState<'mir, 'ty_ctx, 'ctx> {
     builder: Builder<'ctx>,
     module: Module<'ctx>,
     target: TargetMachine,
-    field_orders: SecondaryMap<TyId>,
+    field_orders: HashMap<TyId, Vec<u32>>,
     funcs: SecondaryMap<DefId, FunctionValue<'ctx>>,
     vars: SecondaryMap<LocalId, PointerValue<'ctx>>,
 }
@@ -97,6 +98,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             builder: ctx.create_builder(),
             module,
             target: target_machine,
+            field_orders: HashMap::new(),
             funcs: SecondaryMap::new(),
             vars: SecondaryMap::new(),
         }
@@ -253,9 +255,19 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             Ty::Byte => self.ctx.i8_type().as_basic_type_enum(),
             Ty::Float => self.ctx.f64_type().as_basic_type_enum(),
             Ty::Bool => self.ctx.bool_type().as_basic_type_enum(),
-            Ty::Fields(fields) => self.fields_ty(fields),
+            Ty::Tuple(elem_tys) => {
+                todo!()
+            }
             Ty::Func(..) => self.closure_ty(),
             Ty::FuncItem(_) => panic!("ICE: Tried to lower function item type"),
+            Ty::Named {
+                ident,
+                opaque,
+                fields,
+                ctor,
+                module,
+            } => todo!(),
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         };
 
         assert_eq!(
@@ -325,6 +337,33 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
+    fn get_field_order(&mut self, ty: TyId) -> &[u32] {
+        self.field_orders
+            .entry(ty)
+            .or_insert_with(|| Self::calc_field_order(self.ty_ctx, ty))
+    }
+
+    fn calc_field_order(ty_ctx: &TyContext, ty: TyId) -> Vec<u32> {
+        match ty_ctx.get_ty(ty) {
+            Ty::Tuple(elem_tys) => {
+                todo!()
+                // let mut order: Vec<u32> =
+                //     (0..elem_tys.len().try_into().expect("too many fields")).collect();
+                // order.sort_by_key(|idx| ty_ctx.size_of(elem_tys[usize::try_from(*idx).unwrap()]));
+                // order
+            }
+            Ty::Named { fields, .. } => {
+                todo!()
+                // let mut order: Vec<u32> =
+                //     (0..fields.len().try_into().expect("too many fields")).collect();
+                // order.sort_by_key(|idx| ty_ctx.size_of(fields[usize::try_from(*idx).unwrap()]));
+                // order
+            }
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
+            _ => panic!("ICE: Attempted to calculate field order for type without fields"),
+        }
+    }
+
     fn ptr_ty(&self) -> BasicTypeEnum<'ctx> {
         self.ctx
             .ptr_type(AddressSpace::default())
@@ -380,7 +419,13 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         alloc
     }
 
-    fn build_field(&self, ty: TyId, base: PointerValue<'ctx>, field: u32) -> PointerValue<'ctx> {
+    fn build_field(
+        &mut self,
+        ty: TyId,
+        base: PointerValue<'ctx>,
+        field: usize,
+    ) -> PointerValue<'ctx> {
+        let idx = self.get_field_order(ty)[field];
         match self.ty_ctx.get_ty(ty) {
             Ty::Tuple(ty_ids) => todo!(),
             Ty::Named {
@@ -396,7 +441,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
-    fn build_drop(&self, ty: TyId, place: PointerValue<'ctx>) {
+    fn build_drop(&mut self, ty: TyId, place: PointerValue<'ctx>) {
         match self.ty_ctx.get_ty(ty) {
             Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool | Ty::FuncItem(_) => {} // Trivial types.
             Ty::Tuple(elem_tys) => {
@@ -416,13 +461,13 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
-    fn build_copy(&self, ty: TyId, place: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
+    fn build_copy(&mut self, ty: TyId, place: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
         let temp = self.build_alloca(self.lower_ty(ty), "");
         self.build_copy_to(ty, place, temp);
         temp.as_basic_value_enum()
     }
 
-    fn build_copy_to(&self, ty: TyId, src: PointerValue<'ctx>, dst: PointerValue<'ctx>) {
+    fn build_copy_to(&mut self, ty: TyId, src: PointerValue<'ctx>, dst: PointerValue<'ctx>) {
         match self.ty_ctx.get_ty(ty) {
             Ty::Int | Ty::UInt | Ty::Byte | Ty::Bool | Ty::Float => {
                 let value = self.builder.build_load(self.lower_ty(ty), src, "").unwrap();
@@ -472,7 +517,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     }
 
     fn build_equals(
-        &self,
+        &mut self,
         ty: TyId,
         lhs: BasicValueEnum<'ctx>,
         rhs: BasicValueEnum<'ctx>,
@@ -535,8 +580,6 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         .into_pointer_value()
     }
 
-    /// # Panics
-    /// Panics if the provided type is unsized.
     fn build_memcpy(&self, ty: TyId, dst: PointerValue<'ctx>, src: PointerValue<'ctx>) {
         let align = self.ty_ctx.align_of(ty);
         let size = self
