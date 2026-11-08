@@ -213,12 +213,11 @@ pub enum Expr {
 
 #[derive(Clone, Debug)]
 pub enum Value {
-    /// A copy from a place. This is the default way of reading from a place.
+    /// A copy from a place. The resulting value is independent of the source place.
     Copy(Place),
-    /// A move out of a place.
-    /// This does not run any copy code (such as incrementing a refcount),
-    /// and is used as an optimisation when the source place is never used again.
-    Move(Place),
+    /// A move out of a place. This does not run any copy code (such as incrementing a refcount).
+    /// The resulting value may be tied to the source place, and so neither may be mutated while both are live.
+    Share(Place),
     /// A scalar literal value. The specific kinds of literals are represented by [`LitValue`].
     Lit(LitValue),
     /// A ZST value of the given type.

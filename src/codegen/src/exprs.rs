@@ -23,7 +23,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
 
     fn value_ty(&self, func: &'mir Func, value: &Value) -> TyId {
         match value {
-            Value::Copy(place) | Value::Move(place) => self.place_ty(func, place),
+            Value::Copy(place) | Value::Share(place) => self.place_ty(func, place),
             Value::Lit(lit_value) => match lit_value {
                 LitValue::Int(_) => self.ty_ctx.int(),
                 LitValue::UInt(_) => self.ty_ctx.uint(),
@@ -148,7 +148,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 let place = self.emit_place(func, place);
                 self.build_copy(ty, place)
             }
-            Value::Move(place) => {
+            Value::Share(place) => {
                 let ty = self.place_ty(func, place);
                 let place = self.emit_place(func, place);
                 self.build_move(ty, place)

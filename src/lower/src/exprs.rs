@@ -11,7 +11,7 @@ use irs::{
 use crate::LowerInfo;
 
 impl LowerInfo<'_, '_, '_> {
-    /// Caller's responsibility to ensure the result of the expression is dropped.
+    /// The resulting expression has an indefinite lifetime.
     pub fn lower_as_expr(&mut self, expr_id: ExprId) -> mir::Expr {
         match &self.hir.expr(expr_id).kind {
             ExprKind::Infix(op, lhs, rhs)
@@ -19,12 +19,12 @@ impl LowerInfo<'_, '_, '_> {
             {
                 mir::Expr::Infix(
                     convert_infix_op(*op).unwrap(),
-                    self.lower_as_value(*lhs),
-                    self.lower_as_value(*rhs),
+                    self.lower_as_value(*lhs, true),
+                    self.lower_as_value(*rhs, true),
                 )
             }
             ExprKind::Prefix(op, arg) => {
-                mir::Expr::Prefix(convert_prefix_op(*op), self.lower_as_value(*arg))
+                mir::Expr::Prefix(convert_prefix_op(*op), self.lower_as_value(*arg, true))
             }
             ExprKind::Lambda {
                 params,
@@ -47,15 +47,19 @@ impl LowerInfo<'_, '_, '_> {
             | ExprKind::Continue
             | ExprKind::Return(_)
             | ExprKind::Block(_)
-            | ExprKind::Print(_) => mir::Expr::Val(self.lower_as_value(expr_id)),
+            | ExprKind::Print(_) => mir::Expr::Val(self.lower_as_value(expr_id, false)),
         }
     }
 
-    /// Handles dropping temporaries.
-    pub fn lower_as_value(&mut self, expr_id: ExprId) -> Value {
+    /// `share` should be true when the result is not mutated and
+    /// does not outlive the containing statement.
+    ///
+    /// Situations where the value outlive the containing statement include:
+    /// - Returns
+    /// - Assignments
+    pub fn lower_as_value(&mut self, expr_id: ExprId, share: bool) -> Value {
         let expr = self.hir.expr(expr_id);
         match &expr.kind {
-            ExprKind::Var(_) if self.ty_ctx.is_zst(expr.ty) => Value::Zst(expr.ty),
             ExprKind::Lit(lit) => Value::Lit(self.lower_lit(lit, expr.span, expr.ty)),
             ExprKind::Assign { place, value } => {
                 let place = self.lower_as_place(*place);
@@ -83,13 +87,14 @@ impl LowerInfo<'_, '_, '_> {
             ExprKind::Continue => todo!("Unconditional Control Flow"),
             ExprKind::Return(_) => todo!("Unconditional Control Flow"),
             ExprKind::Print(expr) => {
-                let value = self.lower_as_value(*expr);
+                let value = self.lower_as_value(*expr, true);
                 self.add_stmt(mir::Stmt::Print(value));
                 self.unit()
             }
 
-            ExprKind::Var(_) | ExprKind::Field { .. } => Value::Copy(self.lower_as_place(expr_id)),
-            ExprKind::Tuple(_)
+            ExprKind::Var(_)
+            | ExprKind::Field { .. }
+            | ExprKind::Tuple(_)
             | ExprKind::Infix(_, _, _)
             | ExprKind::Prefix(_, _)
             | ExprKind::Call { .. }
@@ -100,8 +105,10 @@ impl LowerInfo<'_, '_, '_> {
                 let place = self.lower_as_place(expr_id);
                 if self.ty_ctx.is_zst(expr.ty) {
                     Value::Zst(expr.ty)
+                } else if share {
+                    Value::Share(place)
                 } else {
-                    Value::Move(place)
+                    Value::Copy(place)
                 }
             }
         }
@@ -111,10 +118,8 @@ impl LowerInfo<'_, '_, '_> {
     pub fn lower_as_place(&mut self, expr_id: ExprId) -> Place {
         let expr = self.hir.expr(expr_id);
         match &expr.kind {
-            ExprKind::Var(var) if !self.ty_ctx.is_zst(expr.ty) => {
-                Place::local(self.lower_local(*var))
-            }
-            ExprKind::Field { base, field } if !self.ty_ctx.is_zst(expr.ty) => {
+            ExprKind::Var(var) => Place::local(self.lower_local(*var)),
+            ExprKind::Field { base, field } => {
                 let Ty::Named { fields, .. } = self.ty_ctx.get_ty(self.hir.expr(*base).ty) else {
                     unreachable!("field access of non-record type")
                 };
@@ -127,13 +132,10 @@ impl LowerInfo<'_, '_, '_> {
                 place.accesses.push(FieldAccess { index, ty: expr.ty });
                 place
             }
-
-            ExprKind::Var(_)
-            | ExprKind::Lit(_)
+            ExprKind::Lit(_)
             | ExprKind::Tuple(_)
             | ExprKind::Infix(_, _, _)
             | ExprKind::Prefix(_, _)
-            | ExprKind::Field { .. }
             | ExprKind::Call { .. }
             | ExprKind::MethodCall { .. }
             | ExprKind::Lambda { .. }
@@ -176,7 +178,7 @@ impl LowerInfo<'_, '_, '_> {
                 }
             }
             ExprKind::Infix(op, lhs, rhs) if matches!(op, hir::InfixOp::And | hir::InfixOp::Or) => {
-                let lhs = self.lower_as_value(*lhs);
+                let lhs = self.lower_as_value(*lhs, true);
 
                 let th_block = self.func.add_block();
                 let el_block = self.func.add_block();
@@ -208,15 +210,14 @@ impl LowerInfo<'_, '_, '_> {
                 self.block = merge_block;
             }
             ExprKind::Call { callee, args } => {
-                let callee = self.lower_as_value(*callee);
+                let callee = self.lower_as_value(*callee, true);
                 let args = args
                     .iter()
                     .map(|arg| {
                         if arg.mutable {
                             mir::Arg::Place(self.lower_as_place(arg.value))
                         } else {
-                            let value = self.lower_as_value(arg.value);
-                            mir::Arg::Value(value)
+                            mir::Arg::Value(self.lower_as_value(arg.value, true))
                         }
                     })
                     .collect();
@@ -228,7 +229,7 @@ impl LowerInfo<'_, '_, '_> {
             }
             ExprKind::MethodCall { base, method, args } => todo!("Method Lowering"),
             ExprKind::If { cond, th, el } => {
-                let cond = self.lower_as_value(*cond);
+                let cond = self.lower_as_value(*cond, true);
 
                 let th_block = self.func.add_block();
                 let el_block = self.func.add_block();
@@ -369,7 +370,7 @@ impl LowerInfo<'_, '_, '_> {
 
         mir::Expr::Closure {
             body: def,
-            env: Value::Move(env),
+            env: Value::Share(env),
         }
     }
 
@@ -416,7 +417,7 @@ impl LowerInfo<'_, '_, '_> {
         }
 
         // Lower the function body and build the function return.
-        let ret_value = self.lower_as_value(body);
+        let ret_value = self.lower_as_value(body, false);
         self.set_term(mir::Terminator::Return(ret_value));
     }
 

@@ -77,7 +77,7 @@ fn lower_func(
     }
 
     // Lower the function body and build the function return.
-    let ret_value = builder.lower_as_value(body);
+    let ret_value = builder.lower_as_value(body, false);
     builder.set_term(mir::Terminator::Return(ret_value));
 
     func
@@ -137,7 +137,7 @@ fn lower_ctor(ty_ctx: &TyContext, ty: TyId) -> Func {
         );
     }
 
-    func.block_mut(entry).term = Some(Terminator::Return(Value::Move(Place::local(temp))));
+    func.block_mut(entry).term = Some(Terminator::Return(Value::Share(Place::local(temp))));
 
     func
 }
