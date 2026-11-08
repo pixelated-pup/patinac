@@ -38,7 +38,7 @@ use slotmap::SecondaryMap;
 
 use irs::{
     mir::{LocalId, Mir},
-    ty::{DefId, Param, Ty, TyContext, TyId},
+    ty::{DefId, Param, StorageClass, Ty, TyContext, TyId},
 };
 
 pub use config::*;
@@ -64,6 +64,7 @@ struct CodegenState<'mir, 'ty_ctx, 'ctx> {
     builder: Builder<'ctx>,
     module: Module<'ctx>,
     target: TargetMachine,
+    field_orders: SecondaryMap<TyId>,
     funcs: SecondaryMap<DefId, FunctionValue<'ctx>>,
     vars: SecondaryMap<LocalId, PointerValue<'ctx>>,
 }
@@ -300,7 +301,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             .filter_map(|p| {
                 if self.ty_ctx.is_zst(p.ty) {
                     None // Skip passing ZSTs.
-                } else if p.mutable || self.is_indirect(p.ty) {
+                } else if p.mutable || self.ty_ctx.is_indirect(p.ty) {
                     Some(self.ptr_ty().into()) // Pass stack pointers for mutable parameters or indirect types.
                 } else {
                     Some(self.lower_ty(p.ty).into()) // Pass by value otherwise.
@@ -314,7 +315,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
 
         // Add parameter for return pointer if needed.
-        match self.storage_class(ret_ty) {
+        match self.ty_ctx.storage_class(ret_ty) {
             StorageClass::Zst => self.ctx.void_type().fn_type(&param_tys, false),
             StorageClass::Indirect => {
                 param_tys.insert(0, self.ptr_ty().into());
@@ -359,7 +360,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
 
     /// # Panics
     /// Panics if the builder is not positioned, or is positioned but not within a function.
-    fn build_alloca_entry(&self, ty: BasicTypeEnum<'ctx>, name: &str) -> PointerValue<'ctx> {
+    fn build_alloca(&self, ty: BasicTypeEnum<'ctx>, name: &str) -> PointerValue<'ctx> {
         let curr_block = self.curr_block();
         let head_block = self
             .curr_function()
@@ -379,11 +380,27 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         alloc
     }
 
+    fn build_field(&self, ty: TyId, base: PointerValue<'ctx>, field: u32) -> PointerValue<'ctx> {
+        match self.ty_ctx.get_ty(ty) {
+            Ty::Tuple(ty_ids) => todo!(),
+            Ty::Named {
+                ident,
+                opaque,
+                fields,
+                ctor,
+                module,
+            } => todo!(),
+
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
+            _ => panic!("ICE: Tried to build field access for type without fields"),
+        }
+    }
+
     fn build_drop(&self, ty: TyId, place: PointerValue<'ctx>) {
         match self.ty_ctx.get_ty(ty) {
             Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool | Ty::FuncItem(_) => {} // Trivial types.
             Ty::Tuple(elem_tys) => {
-                self.build_call(self.fields_drop(elem_tys), &[place.into()]);
+                self.build_call(self.fields_drop(ty, elem_tys), &[place.into()]);
             }
             Ty::Func(_, _) => {
                 self.build_call(self.any_closure_drop(), &[place.into()]);
@@ -400,33 +417,15 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     }
 
     fn build_copy(&self, ty: TyId, place: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
-        match self.ty_ctx.get_ty(ty) {
-            Ty::Int | Ty::UInt => self
-                .builder
-                .build_load(self.ctx.i64_type(), place, "")
-                .unwrap(),
-            Ty::Byte | Ty::Bool => self
-                .builder
-                .build_load(self.ctx.i8_type(), place, "")
-                .unwrap(),
-            Ty::Float => self
-                .builder
-                .build_load(self.ctx.f64_type(), place, "")
-                .unwrap(),
-            Ty::Tuple(_) | Ty::Func(_, _) | Ty::Named { .. } => {
-                let new_ptr = self.build_alloca_entry(self.lower_ty(ty), "");
-                self.build_copy_to(ty, place, new_ptr);
-                new_ptr.as_basic_value_enum()
-            }
-            Ty::FuncItem(_) => panic!("ICE: Attempted to copy ZST"),
-            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
-        }
+        let temp = self.build_alloca(self.lower_ty(ty), "");
+        self.build_copy_to(ty, place, temp);
+        temp.as_basic_value_enum()
     }
 
     fn build_copy_to(&self, ty: TyId, src: PointerValue<'ctx>, dst: PointerValue<'ctx>) {
         match self.ty_ctx.get_ty(ty) {
             Ty::Int | Ty::UInt | Ty::Byte | Ty::Bool | Ty::Float => {
-                let value = self.build_copy(ty, src);
+                let value = self.builder.build_load(self.lower_ty(ty), src, "").unwrap();
                 self.build_store(ty, value, dst);
             }
             Ty::Tuple(elem_tys) => {
@@ -447,19 +446,11 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
-    fn build_move(&self, ty: TyId, place: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
+    fn build_share(&self, ty: TyId, place: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
         match self.ty_ctx.get_ty(ty) {
-            Ty::Int | Ty::UInt => self
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Bool | Ty::Float => self
                 .builder
-                .build_load(self.ctx.i64_type(), place, "")
-                .unwrap(),
-            Ty::Byte | Ty::Bool => self
-                .builder
-                .build_load(self.ctx.i8_type(), place, "")
-                .unwrap(),
-            Ty::Float => self
-                .builder
-                .build_load(self.ctx.f64_type(), place, "")
+                .build_load(self.lower_ty(ty), place, "")
                 .unwrap(),
             Ty::Tuple(_) | Ty::Func(_, _) | Ty::Named { .. } => place.as_basic_value_enum(),
             Ty::FuncItem(_) => panic!("ICE: Attempted to move ZST"),
@@ -615,52 +606,4 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 .collect::<String>()
         )
     }
-
-    fn storage_class(&self, ty: TyId) -> StorageClass {
-        match self.ty_ctx.get_ty(ty) {
-            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => StorageClass::Scalar,
-            Ty::Tuple(elem_tys) => {
-                if elem_tys.is_empty() {
-                    StorageClass::Zst
-                } else {
-                    StorageClass::Indirect
-                }
-            }
-            Ty::Func(_, _) => StorageClass::Indirect,
-            Ty::FuncItem(_) => StorageClass::Zst,
-            Ty::Named { fields, .. } => {
-                if fields.is_empty() {
-                    StorageClass::Zst
-                } else {
-                    StorageClass::Indirect
-                }
-            }
-            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
-        }
-    }
-
-    fn is_indirect(&self, ty: TyId) -> bool {
-        self.storage_class(ty) == StorageClass::Indirect
-    }
-
-    fn is_trivial(&self, ty: TyId) -> bool {
-        match self.ty_ctx.get_ty(ty) {
-            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool | Ty::FuncItem(_) => true,
-            Ty::Tuple(elem_tys) => elem_tys.iter().all(|ty| self.is_trivial(*ty)),
-            Ty::Func(_, _) => false, // FIXME: Account for non-capturing functions.
-            Ty::Named { fields, .. } => fields.values().all(|ty| self.is_trivial(*ty)),
-            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
-        }
-    }
-
-    fn all_trivial(&self, tys: &[TyId]) -> bool {
-        tys.iter().all(|ty| self.is_trivial(*ty))
-    }
-}
-
-#[derive(PartialEq, Eq, Debug, Clone, Copy)]
-enum StorageClass {
-    Zst,
-    Indirect,
-    Scalar,
 }

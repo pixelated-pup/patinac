@@ -27,22 +27,28 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
     }
 
     pub fn tuple_drop(&self, elem_tys: &[TyId]) -> FunctionValue<'ctx> {
-        let name = format!("{}.drop", self.mangle_tuple(fields));
+        let name = self.mangle_tuple(fields);
         self.fields_drop(elem_tys.iter().copied(), lowered_ty, &name)
     }
 
-    pub fn struct_drop(&self, name: &str, fields: &OrderMap<Ident, TyId>) -> FunctionValue<'ctx> {
+    pub fn struct_drop(
+        &self,
+        name: &str,
+        fields: impl IntoIterator<Item = TyId>,
+    ) -> FunctionValue<'ctx> {
         self.fields_drop(fields, lowered_ty, name)
     }
 
     pub fn fields_drop(
         &self,
+        ty: TyId,
+        ty_name: &str,
         fields: impl IntoIterator<Item = TyId>,
-        lowered_ty: BasicTypeEnum<'ctx>,
-        name: &str,
     ) -> FunctionValue<'ctx> {
+        let name = format!("{ty_name}.drop");
+
         // Check if we already built this function
-        if let Some(func) = self.module.get_function(name) {
+        if let Some(func) = self.module.get_function(&name) {
             return func;
         }
 
@@ -50,17 +56,14 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         let old_insert_block = self.builder.get_insert_block().unwrap();
 
         // Create the function.
-        let func = self.add_func(name, self.drop_func_ty(), false);
+        let func = self.add_func(&name, self.drop_func_ty(), false);
         self.builder
             .position_at_end(self.ctx.append_basic_block(func, "entry"));
         let record = func.get_nth_param(0).unwrap().into_pointer_value();
 
         // Drop each field.
         for (idx, field_ty) in fields.into_iter().enumerate() {
-            let field_ptr = self
-                .builder
-                .build_struct_gep(lowered_ty, record, u32::try_from(idx).unwrap(), "")
-                .unwrap();
+            let field_ptr = self.build_field(ty, base, u32::try_from(idx).unwrap());
             self.build_drop(field_ty, field_ptr);
         }
         self.builder.build_return(None).unwrap();
@@ -88,22 +91,15 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
         let dst = func.get_nth_param(0).unwrap().into_pointer_value();
         let src = func.get_nth_param(1).unwrap().into_pointer_value();
 
-        if self.all_trivial(fields) {
+        if self.ty_ctx.is_trivial(ty) {
             self.build_memcpy(ty, dst, src);
         } else {
-            let ty = self.lower_ty(ty);
-            // If the fields are not all trivial, we need to copy each field individually.
+            // If the fields aren't all trivial, we need to copy each one individually.
             for (idx, field_ty) in fields.iter().enumerate() {
                 let idx = u32::try_from(idx).unwrap();
 
-                let dst = self
-                    .builder
-                    .build_struct_gep(ty, dst, idx, "dstfieldptr")
-                    .unwrap();
-                let src = self
-                    .builder
-                    .build_struct_gep(ty, src, idx, "srcfieldptr")
-                    .unwrap();
+                let dst = self.build_field(ty, dst, idx);
+                let src = self.build_field(ty, src, idx);
 
                 self.build_copy_to(*field_ty, src, dst);
             }
@@ -132,16 +128,15 @@ impl<'ctx> CodegenState<'_, '_, 'ctx> {
             .position_at_end(self.ctx.append_basic_block(func, "entry"));
         let lhs = func.get_nth_param(0).unwrap().into_pointer_value();
         let rhs = func.get_nth_param(1).unwrap().into_pointer_value();
-        let ty = self.lower_ty(ty);
         let ne_block = self.ctx.append_basic_block(func, "ne");
 
         for (idx, field_ty) in fields.iter().enumerate() {
             let idx = u32::try_from(idx).unwrap();
 
-            let lhs = self.builder.build_struct_gep(ty, lhs, idx, "").unwrap();
-            let rhs = self.builder.build_struct_gep(ty, rhs, idx, "").unwrap();
+            let lhs = self.build_field(ty, lhs, idx);
+            let rhs = self.build_field(ty, rhs, idx);
 
-            let (lhs, rhs) = if self.is_indirect(*field_ty) {
+            let (lhs, rhs) = if self.ty_ctx.is_indirect(*field_ty) {
                 (lhs.as_basic_value_enum(), rhs.as_basic_value_enum())
             } else {
                 let field_ty = self.lower_ty(*field_ty);

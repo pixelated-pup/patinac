@@ -182,7 +182,7 @@ impl TyContext {
                 ctor,
                 module,
             } => todo!(),
-            Ty::Var(_) | Ty::IntVar(_) => panic!("Attempted to get size of type variable"),
+            Ty::Var(_) | Ty::IntVar(_) => panic!("Attempted to compute size of type variable"),
         }
     }
 
@@ -205,26 +205,50 @@ impl TyContext {
                 .map(|(_, ty)| self.align_of(*ty))
                 .max()
                 .unwrap_or(1),
-            Ty::Var(_) | Ty::IntVar(_) => panic!("Attempted to get alignment of type variable"),
+            Ty::Var(_) | Ty::IntVar(_) => panic!("Attempted to compute alignment of type variable"),
         }
     }
 
-    /// Returns whether the provided type is a ZST (zero-sized type).
-    /// More efficient than calculating the size and checking if it's 0.
-    ///
-    /// # Panics
-    /// Panics if the provided type is a [`Ty::Var`] or [`Ty::IntVar`].
-    pub fn is_zst(&self, ty: TyId) -> bool {
+    pub fn storage_class(&self, ty: TyId) -> StorageClass {
         match self.get_ty(ty) {
-            Ty::Int | Ty::UInt | Ty::Float | Ty::Byte | Ty::Bool | Ty::Func(_, _) => false,
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => StorageClass::Scalar,
             Ty::Tuple(elem_tys) => {
-                elem_tys.is_empty() || elem_tys.iter().all(|ty| self.is_zst(*ty))
+                if elem_tys.is_empty() || elem_tys.iter().all(|ty| self.is_zst(*ty)) {
+                    StorageClass::Zst
+                } else {
+                    StorageClass::Indirect
+                }
             }
-            Ty::FuncItem(_) => true,
+            Ty::Func(_, _) => StorageClass::Indirect,
+            Ty::FuncItem(_) => StorageClass::Zst,
             Ty::Named { fields, .. } => {
-                fields.is_empty() || fields.iter().all(|(_, ty)| self.is_zst(*ty))
+                if fields.is_empty() || fields.iter().all(|(_, ty)| self.is_zst(*ty)) {
+                    StorageClass::Zst
+                } else {
+                    StorageClass::Indirect
+                }
             }
-            Ty::Var(_) | Ty::IntVar(_) => panic!("Attempted to get size of type variable"),
+            Ty::Var(_) | Ty::IntVar(_) => {
+                panic!("Attempted to compute storage class of type variable")
+            }
+        }
+    }
+
+    pub fn is_indirect(&self, ty: TyId) -> bool {
+        self.storage_class(ty) == StorageClass::Indirect
+    }
+
+    pub fn is_zst(&self, ty: TyId) -> bool {
+        self.storage_class(ty) == StorageClass::Zst
+    }
+
+    pub fn is_trivial(&self, ty: TyId) -> bool {
+        match self.get_ty(ty) {
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool | Ty::FuncItem(_) => true,
+            Ty::Tuple(elem_tys) => elem_tys.iter().all(|ty| self.is_trivial(*ty)),
+            Ty::Func(_, _) => false,
+            Ty::Named { fields, .. } => fields.values().all(|ty| self.is_trivial(*ty)),
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }
 }
@@ -398,4 +422,11 @@ impl Display for ParamDisplay<'_> {
         }
         param.ty.display(ctx).fmt(f)
     }
+}
+
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub enum StorageClass {
+    Zst,
+    Indirect,
+    Scalar,
 }

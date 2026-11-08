@@ -1,17 +1,16 @@
 use inkwell::{
     FloatPredicate,
     basic_block::BasicBlock,
-    types::BasicType as _,
     values::{BasicMetadataValueEnum, BasicValue as _, BasicValueEnum, PointerValue},
 };
 
 use irs::{
     mir::{Arg, BlockId, Expr, Func, InfixOp, LitValue, Place, PrefixOp, Stmt, Terminator, Value},
-    ty::{DefId, Ty, TyId},
+    ty::{DefId, StorageClass, Ty, TyId},
 };
 use slotmap::SecondaryMap;
 
-use crate::{CodegenState, StorageClass};
+use crate::CodegenState;
 
 impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     fn place_ty(&self, func: &'mir Func, place: &Place) -> TyId {
@@ -90,7 +89,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             }
             Terminator::Return(value) => {
                 let value = self.emit_value(mir_func, value);
-                match self.storage_class(mir_func.ret_ty) {
+                match self.ty_ctx.storage_class(mir_func.ret_ty) {
                     StorageClass::Zst => {
                         self.builder.build_return(None).unwrap();
                     }
@@ -151,7 +150,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             Value::Share(place) => {
                 let ty = self.place_ty(func, place);
                 let place = self.emit_place(func, place);
-                self.build_move(ty, place)
+                self.build_share(ty, place)
             }
             Value::Lit(lit) => self.emit_lit(lit),
             Value::Zst(_) => todo!(),
@@ -183,10 +182,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         let mut ty = func.local(place.base).ty;
 
         for access in &place.accesses {
-            base = self
-                .builder
-                .build_struct_gep(self.lower_ty(ty), base, access.index, "")
-                .unwrap();
+            base = self.build_field(ty, access.index);
             ty = access.ty;
         }
 
@@ -348,7 +344,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             })
             .collect();
 
-        match self.storage_class(ret_ty) {
+        match self.ty_ctx.storage_class(ret_ty) {
             StorageClass::Zst => {
                 self.emit_call_inner(callee_ty, callee, args);
             }
@@ -409,10 +405,10 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         let name = self.ty_ctx.def(body).ident.str();
         let body = self.funcs[body];
         let ty = self.closure_ty();
-        let closure = self.build_alloca_entry(ty, "");
+        let closure = self.build_alloca(ty, "");
 
         // Store everything into the closure, emitting the witness functions along the way.
-        let store = |idx, val: PointerValue<'ctx>| {
+        let store = |idx, val| {
             let ptr = self.builder.build_struct_gep(ty, closure, idx, "").unwrap();
             self.builder.build_store(ptr, val).unwrap();
         };
