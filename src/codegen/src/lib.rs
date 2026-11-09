@@ -14,7 +14,7 @@ mod exprs;
 mod runtime;
 mod witnesses;
 
-use std::fmt::Write as _;
+use std::{fmt::Write as _, iter};
 
 use foldhash::{HashMap, HashMapExt as _};
 use inkwell::{
@@ -68,6 +68,7 @@ struct CodegenState<'mir, 'ty_ctx, 'ctx> {
     field_orders: HashMap<TyId, Vec<u32>>,
     funcs: SecondaryMap<DefId, FunctionValue<'ctx>>,
     vars: SecondaryMap<LocalId, PointerValue<'ctx>>,
+    def: DefId,
 }
 
 impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
@@ -101,6 +102,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             field_orders: HashMap::new(),
             funcs: SecondaryMap::new(),
             vars: SecondaryMap::new(),
+            def: DefId::default(),
         }
     }
 
@@ -108,17 +110,13 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
     /// Panics if any functions are invalid, or if writing to the output file fails.
     fn emit(&mut self, opt_level: OptLevel, mode: CodegenMode) {
         for def in self.ty_ctx.defs() {
-            let Ty::Func(params, ret_ty) = &self.mir.var(item.var).ty else {
-                unreachable!("ICE")
-            };
-            let name = Self::mangle_name(self.mir.var(item.var).ident.to_string());
-            let func_ty = self.func_ty(params, ret_ty, false);
+            let def_info = self.ty_ctx.def(def);
+
+            let name = Self::mangle_name(def_info.ident.to_string());
+            let func_ty = self.func_ty(&def_info.params, def_info.ret_ty, false);
+
             let func = self.add_func(&name, func_ty, false);
-            self.funcs.insert(item.var, func);
-            self.vars.insert(
-                item.var,
-                LayoutValue::func_ptr(func_ty, func.as_global_value().as_pointer_value()),
-            );
+            self.funcs.insert(def, func);
         }
 
         // if let Some(main) = self.mir.main() {
@@ -141,38 +139,8 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         // }
 
         for def in self.ty_ctx.defs() {
-            let func = self.mir.func(def);
-            // let Ty::Func(_, ret_ty) = &self.mir.var(item.var).ty else {
-            //     unreachable!("ICE")
-            // };
-            let llvm_func = self.funcs[item.var];
-
-            let entry_block = self.ctx.append_basic_block(func, "entry");
-            self.builder.position_at_end(entry_block);
-
-            // Skip the first argument if it's an out-pointer.
-            let offset = if self.is_indirect(func.ret_ty) { 1 } else { 0 };
-            let mut args = llvm_func.get_param_iter().skip(offset);
-            for id in params {
-                let info = self.mir.var(*id);
-                // We don't actually pass ZSTs.
-                if self.ty_ctx.is_zst(info.ty) {
-                    self.vars.insert(*id, LayoutValue::Zst);
-                    continue;
-                }
-                let value = args.next().expect("there should be enough args");
-                todo!();
-                self.vars.insert(*id, value);
-            }
-
-            self.emit_blocks(func);
-
-            // Clear the parameters to keep the variable map small.
-            for id in params {
-                self.vars.remove(*id);
-            }
-
-            assert!(llvm_func.verify(true));
+            self.def = def;
+            self.emit_func_body();
         }
 
         self.module.verify().unwrap();
@@ -198,6 +166,56 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             }
             CodegenMode::Silent => {}
         }
+    }
+
+    fn emit_func_body(&mut self) {
+        let func = self.mir.func(self.def);
+        let llvm_func = self.funcs[self.def];
+
+        let setup_block = self.ctx.append_basic_block(llvm_func, "");
+        self.builder.position_at_end(setup_block);
+
+        // Skip the first argument if it would be an out-pointer.
+        let offset = if self.ty_ctx.is_indirect(self.ty_ctx.def(self.def).ret_ty) {
+            1
+        } else {
+            0
+        };
+
+        // Set up parameters.
+        let args = llvm_func.get_param_iter();
+        let params = func
+            .locals
+            .iter()
+            .filter(|(_, param)| param.mutable || !self.ty_ctx.is_zst(param.ty));
+        let iter = iter::zip(params, args).skip(offset);
+        for ((local, param), arg) in iter {
+            if !param.mutable && self.ty_ctx.is_zst(param.ty) {
+                // We don't actually pass ZSTs.
+                continue;
+            }
+
+            if param.mutable || self.ty_ctx.is_indirect(param.ty) {
+                // Already will be a pointer.
+                self.vars.insert(local, arg.into_pointer_value());
+            } else {
+                // Need to create a new stack allocation for the parameter.
+                let alloc = self.build_local_alloca(local);
+                self.build_store(param.ty, arg, alloc);
+                self.vars.insert(local, alloc);
+            }
+        }
+
+        // Add allocations for the rest of the local variables.
+        for (local, info) in func.locals.iter().skip(offset + func.param_count) {
+            if info.mutable {
+                continue;
+            }
+        }
+
+        self.emit_blocks(def);
+
+        assert!(llvm_func.verify(true));
     }
 
     #[expect(clippy::as_conversions, reason = "accessing enum discriminant")]
@@ -311,10 +329,10 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         let mut param_tys: Vec<_> = params
             .iter()
             .filter_map(|p| {
-                if self.ty_ctx.is_zst(p.ty) {
-                    None // Skip passing ZSTs.
-                } else if p.mutable || self.ty_ctx.is_indirect(p.ty) {
+                if p.mutable || self.ty_ctx.is_indirect(p.ty) {
                     Some(self.ptr_ty().into()) // Pass stack pointers for mutable parameters or indirect types.
+                } else if self.ty_ctx.is_zst(p.ty) {
+                    None // Skip passing ZSTs.
                 } else {
                     Some(self.lower_ty(p.ty).into()) // Pass by value otherwise.
                 }
@@ -397,8 +415,6 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         self.ctx.ptr_type(AddressSpace::default()).const_null()
     }
 
-    /// # Panics
-    /// Panics if the builder is not positioned, or is positioned but not within a function.
     fn build_alloca(&self, ty: BasicTypeEnum<'ctx>, name: &str) -> PointerValue<'ctx> {
         let curr_block = self.curr_block();
         let head_block = self
@@ -419,6 +435,16 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         alloc
     }
 
+    fn build_local_alloca(&self, local: LocalId) -> PointerValue<'ctx> {
+        let local = self.mir.func(self.def).local(local);
+        // Need to create a new stack allocation for the parameter.
+        let name = match local.ident {
+            Some(ident) => &ident.str(),
+            None => "",
+        };
+        self.build_alloca(self.lower_ty(local.ty), name)
+    }
+
     fn build_field(
         &mut self,
         ty: TyId,
@@ -426,19 +452,9 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         field: usize,
     ) -> PointerValue<'ctx> {
         let idx = self.get_field_order(ty)[field];
-        match self.ty_ctx.get_ty(ty) {
-            Ty::Tuple(ty_ids) => todo!(),
-            Ty::Named {
-                ident,
-                opaque,
-                fields,
-                ctor,
-                module,
-            } => todo!(),
-
-            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
-            _ => panic!("ICE: Tried to build field access for type without fields"),
-        }
+        self.builder
+            .build_struct_gep(self.lower_ty(ty), base, idx, "")
+            .unwrap()
     }
 
     fn build_drop(&mut self, ty: TyId, place: PointerValue<'ctx>) {

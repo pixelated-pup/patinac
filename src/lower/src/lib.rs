@@ -62,7 +62,7 @@ fn lower_func(
     params: &[VarId],
     body: ExprId,
 ) -> Func {
-    let mut func = Func::new(params.len(), hir.expr(body).ty);
+    let mut func = Func::new(params.len());
     let mut builder = LowerInfo::new(hir, ty_ctx, handler, mir, def, &mut func);
 
     // Set up function parameters.
@@ -91,7 +91,7 @@ fn lower_const(
     def: DefId,
     expr: ExprId,
 ) -> Func {
-    let mut func = Func::new(0, hir.expr(expr).ty);
+    let mut func = Func::new(0);
     let mut builder = LowerInfo::new(hir, ty_ctx, handler, mir, def, &mut func);
 
     // Lower the function body and build the function return.
@@ -107,7 +107,7 @@ fn lower_ctor(ty_ctx: &TyContext, ty: TyId) -> Func {
         unreachable!("ICE: Attempted to lower constructor for non-named type")
     };
 
-    let mut func = Func::new(fields.len(), ty);
+    let mut func = Func::new(fields.len());
     let entry = func.add_block();
 
     let temp = func.add_temp(ty);

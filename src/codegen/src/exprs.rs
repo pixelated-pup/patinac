@@ -1,7 +1,10 @@
 use inkwell::{
-    FloatPredicate,
+    FloatPredicate, IntPredicate,
     basic_block::BasicBlock,
-    values::{BasicMetadataValueEnum, BasicValue as _, BasicValueEnum, PointerValue},
+    builder::BuilderError,
+    values::{
+        BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, IntValue, PointerValue,
+    },
 };
 
 use irs::{
@@ -34,14 +37,17 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
-    pub(crate) fn emit_blocks(&mut self, func: &'mir Func) {
+    pub(crate) fn emit_blocks(&mut self, def: DefId) {
+        let func = self.mir.func(def);
+
         let mut blocks = SecondaryMap::new();
+
         for block in func.blocks.keys() {
             let llvm_block = self.emit_block_stmts(func, block);
             blocks.insert(block, llvm_block);
         }
         for block in func.blocks.keys() {
-            self.emit_block_term(func, block, &blocks);
+            self.emit_block_term(&blocks, def, func, block);
         }
     }
 
@@ -58,13 +64,14 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
 
     fn emit_block_term(
         &mut self,
-        mir_func: &'mir Func,
-        mir_block: BlockId,
         blocks: &SecondaryMap<BlockId, BasicBlock<'ctx>>,
+        def: DefId,
+        func: &'mir Func,
+        block: BlockId,
     ) {
-        self.builder.position_at_end(blocks[mir_block]);
+        self.builder.position_at_end(blocks[block]);
 
-        match mir_func.block(mir_block).terminator() {
+        match func.block(block).terminator() {
             Terminator::Goto(next_block) => {
                 self.builder
                     .build_unconditional_branch(blocks[*next_block])
@@ -75,7 +82,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 targets,
                 otherwise,
             } => {
-                let scrutinee = self.emit_value(mir_func, scrutinee).into_int_value();
+                let scrutinee = self.emit_value(func, scrutinee).into_int_value();
                 let targets: Vec<_> = targets
                     .iter()
                     .map(|(value, block)| {
@@ -88,8 +95,9 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                     .unwrap();
             }
             Terminator::Return(value) => {
-                let value = self.emit_value(mir_func, value);
-                match self.ty_ctx.storage_class(mir_func.ret_ty) {
+                let ret_ty = self.ty_ctx.def(def).ret_ty;
+                let value = self.emit_value(func, value);
+                match self.ty_ctx.storage_class(ret_ty) {
                     StorageClass::Zst => {
                         self.builder.build_return(None).unwrap();
                     }
@@ -99,7 +107,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                             .get_first_param()
                             .unwrap()
                             .into_pointer_value();
-                        self.build_store(mir_func.ret_ty, value, dst);
+                        self.build_store(ret_ty, value, dst);
                         self.builder.build_return(None).unwrap();
                     }
                     StorageClass::Scalar => {
@@ -199,6 +207,30 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
+    fn numeric_op<
+        const N: usize,
+        FRes: BasicValue<'ctx>,
+        IRes: BasicValue<'ctx>,
+        FOp: FnOnce([FloatValue<'ctx>; N]) -> Result<FRes, BuilderError>,
+        IOp: FnOnce([IntValue<'ctx>; N], bool) -> Result<IRes, BuilderError>,
+    >(
+        &self,
+        ty: TyId,
+        values: [BasicValueEnum<'ctx>; N],
+        float_op: FOp,
+        int_op: IOp,
+    ) -> BasicValueEnum<'ctx> {
+        if ty == self.ty_ctx.float() {
+            float_op(values.map(|v| v.into_float_value()))
+                .unwrap()
+                .as_basic_value_enum()
+        } else {
+            int_op(values.map(|v| v.into_int_value()), ty == self.ty_ctx.int())
+                .unwrap()
+                .as_basic_value_enum()
+        }
+    }
+
     fn emit_infix(
         &mut self,
         func: &'mir Func,
@@ -210,56 +242,36 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         let lhs = self.emit_value(func, lhs);
         let rhs = self.emit_value(func, rhs);
         match op {
-            InfixOp::Add => {
-                if ty == self.ty_ctx.float() {
-                    self.builder
-                        .build_float_add(lhs.into_float_value(), rhs.into_float_value(), "")
-                        .unwrap()
-                        .as_basic_value_enum()
-                } else {
-                    self.builder
-                        .build_int_add(lhs.into_int_value(), rhs.into_int_value(), "")
-                        .unwrap()
-                        .as_basic_value_enum()
-                }
-            }
-
-            InfixOp::Sub => {
-                if ty == self.ty_ctx.float() {
-                    self.builder
-                        .build_float_sub(lhs.into_float_value(), rhs.into_float_value(), "")
-                        .unwrap()
-                        .as_basic_value_enum()
-                } else {
-                    self.builder
-                        .build_int_sub(lhs.into_int_value(), rhs.into_int_value(), "")
-                        .unwrap()
-                        .as_basic_value_enum()
-                }
-            }
-            InfixOp::Mul => {
-                if ty == self.ty_ctx.float() {
-                    self.builder
-                        .build_float_mul(lhs.into_float_value(), rhs.into_float_value(), "")
-                        .unwrap()
-                        .as_basic_value_enum()
-                } else {
-                    self.builder
-                        .build_int_mul(lhs.into_int_value(), rhs.into_int_value(), "")
-                        .unwrap()
-                        .as_basic_value_enum()
-                }
-            }
-            InfixOp::Div => {
-                if ty == self.ty_ctx.float() {
-                    self.builder
-                        .build_float_div(lhs.into_float_value(), rhs.into_float_value(), "")
-                        .unwrap()
-                        .as_basic_value_enum()
-                } else {
-                    todo!()
-                }
-            }
+            InfixOp::Add => self.numeric_op(
+                ty,
+                [lhs, rhs],
+                |[lhs, rhs]| self.builder.build_float_add(lhs, rhs, ""),
+                |[lhs, rhs], _| self.builder.build_int_add(lhs, rhs, ""),
+            ),
+            InfixOp::Sub => self.numeric_op(
+                ty,
+                [lhs, rhs],
+                |[lhs, rhs]| self.builder.build_float_sub(lhs, rhs, ""),
+                |[lhs, rhs], _| self.builder.build_int_sub(lhs, rhs, ""),
+            ),
+            InfixOp::Mul => self.numeric_op(
+                ty,
+                [lhs, rhs],
+                |[lhs, rhs]| self.builder.build_float_mul(lhs, rhs, ""),
+                |[lhs, rhs], _| self.builder.build_int_mul(lhs, rhs, ""),
+            ),
+            InfixOp::Div => self.numeric_op(
+                ty,
+                [lhs, rhs],
+                |[lhs, rhs]| self.builder.build_float_div(lhs, rhs, ""),
+                |[lhs, rhs], signed| {
+                    if signed {
+                        self.builder.build_int_signed_div(lhs, rhs, "")
+                    } else {
+                        self.builder.build_int_unsigned_div(lhs, rhs, "")
+                    }
+                },
+            ),
             InfixOp::Exp => todo!(),
             op @ (InfixOp::Eqq | InfixOp::Neq) => {
                 let equals = self.build_equals(ty, lhs, rhs);
@@ -270,50 +282,63 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 }
                 .as_basic_value_enum()
             }
-            InfixOp::Gt => self
-                .builder
-                .build_float_compare(
-                    FloatPredicate::OGT,
-                    lhs.into_float_value(),
-                    rhs.into_float_value(),
-                    "",
-                )
-                .unwrap()
-                .as_basic_value_enum(),
-            InfixOp::Lt => self
-                .builder
-                .build_float_compare(
-                    FloatPredicate::OLT,
-                    lhs.into_float_value(),
-                    rhs.into_float_value(),
-                    "",
-                )
-                .unwrap()
-                .as_basic_value_enum(),
-            InfixOp::Geq => self
-                .builder
-                .build_float_compare(
-                    FloatPredicate::OGE,
-                    lhs.into_float_value(),
-                    rhs.into_float_value(),
-                    "",
-                )
-                .unwrap()
-                .as_basic_value_enum(),
-            InfixOp::Leq => self
-                .builder
-                .build_float_compare(
-                    FloatPredicate::OLE,
-                    lhs.into_float_value(),
-                    rhs.into_float_value(),
-                    "",
-                )
-                .unwrap()
-                .as_basic_value_enum(),
+            InfixOp::Gt => self.numeric_op(
+                ty,
+                [lhs, rhs],
+                |[lhs, rhs]| {
+                    self.builder
+                        .build_float_compare(FloatPredicate::OGT, lhs, rhs, "")
+                },
+                |[lhs, rhs], signed| {
+                    use IntPredicate as IP;
+                    let op = if signed { IP::SGT } else { IP::UGT };
+                    self.builder.build_int_compare(op, lhs, rhs, "")
+                },
+            ),
+            InfixOp::Lt => self.numeric_op(
+                ty,
+                [lhs, rhs],
+                |[lhs, rhs]| {
+                    self.builder
+                        .build_float_compare(FloatPredicate::OLT, lhs, rhs, "")
+                },
+                |[lhs, rhs], signed| {
+                    use IntPredicate as IP;
+                    let op = if signed { IP::SLT } else { IP::ULT };
+                    self.builder.build_int_compare(op, lhs, rhs, "")
+                },
+            ),
+            InfixOp::Geq => self.numeric_op(
+                ty,
+                [lhs, rhs],
+                |[lhs, rhs]| {
+                    self.builder
+                        .build_float_compare(FloatPredicate::OGE, lhs, rhs, "")
+                },
+                |[lhs, rhs], signed| {
+                    use IntPredicate as IP;
+                    let op = if signed { IP::SGE } else { IP::UGE };
+                    self.builder.build_int_compare(op, lhs, rhs, "")
+                },
+            ),
+            InfixOp::Leq => self.numeric_op(
+                ty,
+                [lhs, rhs],
+                |[lhs, rhs]| {
+                    self.builder
+                        .build_float_compare(FloatPredicate::OLE, lhs, rhs, "")
+                },
+                |[lhs, rhs], signed| {
+                    use IntPredicate as IP;
+                    let op = if signed { IP::SLE } else { IP::ULE };
+                    self.builder.build_int_compare(op, lhs, rhs, "")
+                },
+            ),
         }
     }
 
     fn emit_prefix(&mut self, func: &'mir Func, op: PrefixOp, arg: &Value) -> BasicValueEnum<'ctx> {
+        let ty = self.value_ty(func, arg);
         let arg = self.emit_value(func, arg);
         match op {
             PrefixOp::Not => self
@@ -321,11 +346,12 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 .build_not(arg.into_int_value(), "")
                 .unwrap()
                 .as_basic_value_enum(),
-            PrefixOp::Neg => self
-                .builder
-                .build_float_neg(arg.into_float_value(), "")
-                .unwrap()
-                .as_basic_value_enum(),
+            PrefixOp::Neg => self.numeric_op(
+                ty,
+                [arg],
+                |[arg]| self.builder.build_float_neg(arg, ""),
+                |[arg], _| self.builder.build_int_neg(arg, ""),
+            ),
         }
     }
 
@@ -339,8 +365,8 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         let mut args: Vec<_> = args
             .iter()
             .map(|arg| match arg {
-                Arg::Value(value) => self.emit_value(func, value).into(),
-                Arg::Place(place) => self.emit_place(func, place).into(),
+                Arg::Immut(value) => self.emit_value(func, value).into(),
+                Arg::Mut(place) => self.emit_place(func, place).into(),
             })
             .collect();
 

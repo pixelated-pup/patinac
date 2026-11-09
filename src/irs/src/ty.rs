@@ -286,9 +286,16 @@ new_key_type! {
 
 #[derive(Debug)]
 pub struct DefInfo {
+    /// The name of the definition.
     pub ident: Ident,
     /// The module containing the definition.
     pub module: ModuleId,
+    /// The type information for the definition's parameters.
+    /// Empty if it's a constant.
+    pub params: Vec<Param>,
+    /// The return type of the definiton if it's a function,
+    /// or the type of the definition if it's a constant.
+    pub ret_ty: TyId,
 }
 
 /// An ID representing an interned type. Information about the type can be acquired through [`Hir::ty_kind`].

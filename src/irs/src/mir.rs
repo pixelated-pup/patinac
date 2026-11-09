@@ -40,8 +40,6 @@ impl Mir {
 pub struct Func {
     /// The number of parameters that the function has.
     pub param_count: usize,
-    /// The return type of the function.
-    pub ret_ty: TyId,
     /// The local variables of the function.
     ///
     /// The first `arg_count` are the function's arguments,
@@ -52,10 +50,11 @@ pub struct Func {
 }
 
 impl Func {
-    pub fn new(param_count: usize, ret_ty: TyId) -> Self {
+    /// Creates a new empty function with the given parameter count.
+    /// The locals representing the parameters must still be set up.
+    pub fn new(param_count: usize) -> Self {
         Self {
             param_count,
-            ret_ty,
             locals: SlotMap::default(),
             blocks: SlotMap::default(),
         }
@@ -80,6 +79,7 @@ impl Func {
         })
     }
 
+    /// Adds a new empty block to this function and returns it's id.
     pub fn add_block(&mut self) -> BlockId {
         self.blocks.insert(Block {
             stmts: Vec::new(),
@@ -87,14 +87,17 @@ impl Func {
         })
     }
 
+    /// Returns a reference to the block with the given id.
     pub fn block(&self, block: BlockId) -> &Block {
         &self.blocks[block]
     }
 
+    /// Returns a mutable reference to the block with the given id.
     pub fn block_mut(&mut self, block: BlockId) -> &mut Block {
         &mut self.blocks[block]
     }
 
+    /// Appends a statement to the block with the given id.
     pub fn add_stmt(&mut self, block: BlockId, stmt: Stmt) {
         self.block_mut(block).stmts.push(stmt);
     }
@@ -123,6 +126,7 @@ new_key_type! {
 /// A basic block of control flow.
 #[derive(Debug)]
 pub struct Block {
+    /// The statements contained within the block.
     pub stmts: Vec<Stmt>,
     /// The terminator of the block.
     ///
@@ -132,6 +136,11 @@ pub struct Block {
 }
 
 impl Block {
+    /// Returns the terminator of the block.
+    ///
+    /// # Panics
+    /// Panics if the terminator has not yet been set.
+    /// This should only be the case while the block is being built.
     pub fn terminator(&self) -> &Terminator {
         self.term
             .as_ref()
@@ -189,8 +198,10 @@ pub enum Stmt {
 /// An argument in a [function call][Stmt::Call]. Either a [`Value`] or a [`Place`].
 #[derive(Debug)]
 pub enum Arg {
-    Value(Value),
-    Place(Place),
+    /// An immutable argument passed as a value.
+    Immut(Value),
+    /// A mutable argument passed as a place.
+    Mut(Place),
 }
 
 /// An expression.
@@ -211,6 +222,12 @@ pub enum Expr {
     },
 }
 
+/// A simple value that needs minimal further evaluation.
+///
+/// Values act as operands to [`Exprs`][Expr],
+/// and are either some form of read from a [`place`][`Place`],
+/// a [`literal`][`LitValue`],
+/// or a constant ZST value.
 #[derive(Clone, Debug)]
 pub enum Value {
     /// A copy from a place. The resulting value is independent of the source place.
@@ -224,6 +241,10 @@ pub enum Value {
     Zst(TyId),
 }
 
+/// A place, identifying a memory location.
+///
+/// A place is a local variables with possible field accesses projecting from it.
+/// It may either be written to, read from, or used as a mutable parameter.
 #[derive(Clone, Debug)]
 pub struct Place {
     /// The base variable this place is derived from.
@@ -234,6 +255,7 @@ pub struct Place {
 }
 
 impl Place {
+    /// Constructs a new place representing a local variable with no field accesses.
     pub fn local(local: LocalId) -> Self {
         Self {
             base: local,
@@ -242,9 +264,14 @@ impl Place {
     }
 }
 
+/// A field access used as part of a [`Place`].
+///
+/// In the MIR, fields are represented by index in the order written in the source code.
 #[derive(Clone, Copy, Debug)]
 pub struct FieldAccess {
+    /// The source-code index of the field being accessed.
     pub idx: usize,
+    /// The type of the field being accessed.
     pub ty: TyId,
 }
 
@@ -266,24 +293,38 @@ pub enum LitValue {
 /// An infix operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InfixOp {
+    /// Float or integer addition.
     Add,
+    /// Float or integer subtraction.
     Sub,
+    /// Float or integer multiplication.
     Mul,
+    /// Float or integer division.
+    ///
+    /// Integer division by zero is undefined behaviour,
+    /// and checks should have been inserted into the MIR around this operator.
     Div,
+    /// Exponentiation.
     Exp,
+    /// Equality, on any type.
     Eqq,
+    /// Inequality, on any type.
     Neq,
+    /// Float or integer greater-than comparison.
     Gt,
+    /// Float or integer less-than comparison.
     Lt,
+    /// Float or integer greater-than or equal-to comparison.
     Geq,
+    /// Float or integer less-than or equal-to comparison.
     Leq,
 }
 
 /// A prefix operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefixOp {
-    /// `!`. Logical negation.
+    /// Boolean negation.
     Not,
-    /// `-`. Numeric negation.
+    /// Float or integer negation.
     Neg,
 }

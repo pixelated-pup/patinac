@@ -67,11 +67,7 @@ impl TypeChecker<'_, '_, '_> {
                 // )
                 ret_ty
             }
-            ExprKind::Lambda {
-                params,
-                body,
-                captures,
-            } => {
+            ExprKind::Lambda { params, body, .. } => {
                 let param_tys = params
                     .iter()
                     .map(|param| {

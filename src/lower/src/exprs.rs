@@ -5,7 +5,7 @@ use ident::Ident;
 use irs::{
     hir::{self, ExprId, ExprKind, LitExpr, VarId},
     mir::{self, FieldAccess, Func, Local, LocalId, Place, Terminator, Value},
-    ty::{DefInfo, Ty, TyId},
+    ty::{DefInfo, Param, Ty, TyId},
 };
 
 use crate::LowerInfo;
@@ -17,6 +17,7 @@ impl LowerInfo<'_, '_, '_> {
             ExprKind::Infix(op, lhs, rhs)
                 if !matches!(op, hir::InfixOp::And | hir::InfixOp::Or) =>
             {
+                // TODO: Check for div-by-zero
                 mir::Expr::Infix(
                     convert_infix_op(*op).unwrap(),
                     self.lower_as_value(*lhs, true),
@@ -218,9 +219,9 @@ impl LowerInfo<'_, '_, '_> {
                     .iter()
                     .map(|arg| {
                         if arg.mutable {
-                            mir::Arg::Place(self.lower_as_place(arg.value))
+                            mir::Arg::Mut(self.lower_as_place(arg.value))
                         } else {
-                            mir::Arg::Value(self.lower_as_value(arg.value, true))
+                            mir::Arg::Immut(self.lower_as_value(arg.value, true))
                         }
                     })
                     .collect();
@@ -355,10 +356,21 @@ impl LowerInfo<'_, '_, '_> {
         self.lambda_counter += 1;
 
         // Construct the lifted function.
-        let mut body_func = Func::new(params.len() + 1, self.hir.expr(body).ty);
+        let mut body_func = Func::new(params.len() + 1);
         let def = self.ty_ctx.add_def(DefInfo {
             ident: Ident::new(&func_name),
             module: self.def().module,
+            params: params
+                .iter()
+                .map(|var| {
+                    let var = self.hir.var(*var);
+                    Param {
+                        ty: var.ty,
+                        mutable: var.mutable,
+                    }
+                })
+                .collect(),
+            ret_ty: self.hir.expr(body).ty,
         });
         let mut builder = LowerInfo::new(
             self.hir,
@@ -386,11 +398,11 @@ impl LowerInfo<'_, '_, '_> {
     ) {
         // Set up function parameters.
         for &param in params {
-            let info = self.hir.var(param);
+            let var = self.hir.var(param);
             let local = self.func.add_local(Local {
-                ident: Some(info.ident.ident),
-                mutable: info.mutable,
-                ty: info.ty,
+                ident: Some(var.ident.ident),
+                mutable: var.mutable,
+                ty: var.ty,
             });
             self.var_map.insert(param, local);
         }
