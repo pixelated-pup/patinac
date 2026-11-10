@@ -182,8 +182,8 @@ pub enum Stmt {
     // Expr(ExprId),
     /// A function call.
     Call {
-        /// The function being called.
-        callee: Value,
+        /// The function or closure being called.
+        callee: Callee,
         /// The list of arguments being applied.
         args: Vec<Arg>,
         /// Where the result of the function call will be stored.
@@ -193,6 +193,15 @@ pub enum Stmt {
     Drop(Place),
     /// TEMPORARY, until we have stdlib + FFI.
     Print(Value),
+}
+
+/// The callee of a [function call][Stmt::Call].
+#[derive(Debug)]
+pub enum Callee {
+    /// A direct call to a compile-time known function.
+    Direct(DefId),
+    /// A call via a closure.
+    Closure(Value),
 }
 
 /// An argument in a [function call][Stmt::Call]. Either a [`Value`] or a [`Place`].

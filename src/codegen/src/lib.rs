@@ -277,7 +277,6 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 todo!()
             }
             Ty::Func(..) => self.closure_ty(),
-            Ty::FuncItem(_) => panic!("ICE: Tried to lower function item type"),
             Ty::Named {
                 ident,
                 opaque,
@@ -459,7 +458,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
 
     fn build_drop(&mut self, ty: TyId, place: PointerValue<'ctx>) {
         match self.ty_ctx.get_ty(ty) {
-            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool | Ty::FuncItem(_) => {} // Trivial types.
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => {} // Trivial types.
             Ty::Tuple(elem_tys) => {
                 self.build_call(self.fields_drop(ty, elem_tys), &[place.into()]);
             }
@@ -502,7 +501,6 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 ctor,
                 module,
             } => todo!(),
-            Ty::FuncItem(_) => panic!("ICE: Attempted to copy ZST"),
             Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }
@@ -514,7 +512,6 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 .build_load(self.lower_ty(ty), place, "")
                 .unwrap(),
             Ty::Tuple(_) | Ty::Func(_, _) | Ty::Named { .. } => place.as_basic_value_enum(),
-            Ty::FuncItem(_) => panic!("ICE: Attempted to move ZST"),
             Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }
@@ -527,7 +524,6 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             Ty::Tuple(_) | Ty::Func(_, _) | Ty::Named { .. } => {
                 self.build_memcpy(ty, dst, value.into_pointer_value())
             }
-            Ty::FuncItem(_) => panic!("ICE: Attempted to store ZST"),
             Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }
@@ -565,7 +561,6 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 .build_call(self.any_closure_equals(), &[lhs.into(), rhs.into()])
                 .unwrap()
                 .into_int_value(),
-            Ty::FuncItem(_) => self.const_bool(true),
             Ty::Named {
                 ident,
                 opaque,
@@ -644,7 +639,6 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                 });
                 format!("F{param_names}R{}", self.mangle_ty(*ret_ty))
             }
-            Ty::FuncItem(def) => todo!(),
             Ty::Named {
                 ident,
                 opaque,

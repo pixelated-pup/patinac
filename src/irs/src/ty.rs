@@ -174,7 +174,6 @@ impl TyContext {
             //     base_size + end_padding
             // }
             Ty::Func(_, _) => PTR_SIZE * 4, // Function, environment, drop, copy.
-            Ty::FuncItem(_) => 0,
             Ty::Named {
                 ident,
                 opaque,
@@ -199,7 +198,6 @@ impl TyContext {
                 .max()
                 .unwrap_or(1),
             Ty::Func(_, _) => PTR_SIZE,
-            Ty::FuncItem(_) => 1,
             Ty::Named { fields, .. } => fields
                 .iter()
                 .map(|(_, ty)| self.align_of(*ty))
@@ -220,7 +218,6 @@ impl TyContext {
                 }
             }
             Ty::Func(_, _) => StorageClass::Indirect,
-            Ty::FuncItem(_) => StorageClass::Zst,
             Ty::Named { fields, .. } => {
                 if fields.is_empty() || fields.iter().all(|(_, ty)| self.is_zst(*ty)) {
                     StorageClass::Zst
@@ -244,7 +241,7 @@ impl TyContext {
 
     pub fn is_trivial(&self, ty: TyId) -> bool {
         match self.get_ty(ty) {
-            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool | Ty::FuncItem(_) => true,
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => true,
             Ty::Tuple(elem_tys) => elem_tys.iter().all(|ty| self.is_trivial(*ty)),
             Ty::Func(_, _) => false,
             Ty::Named { fields, .. } => fields.values().all(|ty| self.is_trivial(*ty)),
@@ -342,8 +339,6 @@ pub enum Ty {
     Tuple(Vec<TyId>),
     /// A first-class function value, implemented as a closure.
     Func(Vec<Param>, TyId),
-    /// The unnameable type of a single function item. Does not exist at runtime.
-    FuncItem(DefId),
     /// A user-defined type, such as a `record` or `union`.
     Named {
         /// The name of the type.
@@ -409,7 +404,6 @@ impl Display for TyDisplay<'_> {
                 let params = params.iter().map(|param| param.display(ctx)).join(", ");
                 write!(f, "Fn({params}) -> {}", ret_ty.display(ctx))
             }
-            Ty::FuncItem(def) => todo!(),
             Ty::Named { ident, .. } => ident.fmt(f),
             Ty::Var(id) => write!(f, "?{}", id.0),
             Ty::IntVar(_) => write!(f, "{{int}}"),

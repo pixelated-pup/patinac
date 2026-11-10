@@ -8,7 +8,10 @@ use inkwell::{
 };
 
 use irs::{
-    mir::{Arg, BlockId, Expr, Func, InfixOp, LitValue, Place, PrefixOp, Stmt, Terminator, Value},
+    mir::{
+        Arg, BlockId, Callee, Expr, Func, InfixOp, LitValue, Place, PrefixOp, Stmt, Terminator,
+        Value,
+    },
     ty::{DefId, StorageClass, Ty, TyId},
 };
 use slotmap::SecondaryMap;
@@ -355,12 +358,9 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
-    fn emit_call(&mut self, func: &'mir Func, callee: &Value, args: &[Arg], dst: &Place) {
+    fn emit_call(&mut self, func: &'mir Func, callee: &Callee, args: &[Arg], dst: &Place) {
         let ret_ty = self.place_ty(func, dst);
         let dst = self.emit_place(func, dst);
-
-        let callee_ty = self.value_ty(func, callee);
-        let callee = self.emit_value(func, callee);
 
         let mut args: Vec<_> = args
             .iter()
@@ -372,14 +372,14 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
 
         match self.ty_ctx.storage_class(ret_ty) {
             StorageClass::Zst => {
-                self.emit_call_inner(callee_ty, callee, args);
+                self.emit_call_inner(func, callee, args);
             }
             StorageClass::Indirect => {
                 args.insert(0, dst.into());
-                self.emit_call_inner(callee_ty, callee, args);
+                self.emit_call_inner(func, callee, args);
             }
             StorageClass::Scalar => {
-                let result = self.emit_call_inner(callee_ty, callee, args).unwrap();
+                let result = self.emit_call_inner(func, callee, args).unwrap();
                 self.build_store(ret_ty, result, dst);
             }
         }
@@ -387,14 +387,19 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
 
     fn emit_call_inner(
         &mut self,
-        callee_ty: TyId,
-        callee: BasicValueEnum<'ctx>,
+        func: &'mir Func,
+        callee: &Callee,
         mut args: Vec<BasicMetadataValueEnum<'ctx>>,
     ) -> Option<BasicValueEnum<'ctx>> {
-        match self.ty_ctx.get_ty(callee_ty) {
-            Ty::Func(params, ret_ty) => {
+        match callee {
+            Callee::Direct(def) => self.build_call(self.funcs[*def], &args),
+            Callee::Closure(closure) => {
                 let ty = self.closure_ty();
-                let closure = callee.into_pointer_value();
+                let Ty::Func(params, ret_ty) = self.ty_ctx.get_ty(self.value_ty(func, closure))
+                else {
+                    unreachable!("ICE: Incorrect type for function callee");
+                };
+                let closure = self.emit_value(func, closure).into_pointer_value();
 
                 // Extract environment from closure and add it to arguments.
                 let env = self.builder.build_struct_gep(ty, closure, 1, "").unwrap();
@@ -410,8 +415,6 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
                     &args,
                 )
             }
-            Ty::FuncItem(def) => self.build_call(self.funcs[*def], &args),
-            _ => unreachable!("wrong type for function"),
         }
     }
 

@@ -198,7 +198,7 @@ impl<'ext, 'mir, 'func> LowerInfo<'ext, 'mir, 'func> {
             None => {
                 let info = self.hir.var(var);
                 assert!(
-                    !info.global,
+                    info.global_id.is_none(),
                     "Variables representing top-level items should not be lowered to MIR locals"
                 );
                 let local = self.func.add_local(Local {

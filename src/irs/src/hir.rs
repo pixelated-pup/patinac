@@ -119,8 +119,8 @@ pub struct Var {
     pub mutable: bool,
     /// The type of the variable. May be `Var` prior to inference.
     pub ty: TyId,
-    /// Whether the variable is global (i.e. represents an [`ExecItem`]).
-    pub global: bool,
+    /// The definition represented by this variable, if it's global.
+    pub global_id: Option<DefId>,
     /// The module containing the variable's declaration.
     pub module: ModuleId,
 }

@@ -4,7 +4,7 @@ use errors::Report;
 use ident::Ident;
 use irs::{
     hir::{self, ExprId, ExprKind, LitExpr, VarId},
-    mir::{self, FieldAccess, Func, Local, LocalId, Place, Terminator, Value},
+    mir::{self, Callee, FieldAccess, Func, Local, LocalId, Place, Terminator, Value},
     ty::{DefInfo, Param, Ty, TyId},
 };
 
@@ -14,6 +14,12 @@ impl LowerInfo<'_, '_, '_> {
     /// The resulting expression has an indefinite lifetime.
     pub fn lower_as_expr(&mut self, expr_id: ExprId) -> mir::Expr {
         match &self.hir.expr(expr_id).kind {
+            ExprKind::Var(var) if let Some(def) = self.hir.var(*var).global_id => {
+                mir::Expr::Closure {
+                    body: def,
+                    env: Value::Zst(self.ty_ctx.unit()),
+                }
+            }
             ExprKind::Infix(op, lhs, rhs)
                 if !matches!(op, hir::InfixOp::And | hir::InfixOp::Or) =>
             {
@@ -55,7 +61,7 @@ impl LowerInfo<'_, '_, '_> {
     /// `share` should be true when the result is not mutated and
     /// does not outlive the containing statement.
     ///
-    /// Situations where the value outlive the containing statement include:
+    /// Situations where the value outlives the containing statement include:
     /// - Returns
     /// - Assignments
     pub fn lower_as_value(&mut self, expr_id: ExprId, share: bool) -> Value {
@@ -119,7 +125,9 @@ impl LowerInfo<'_, '_, '_> {
     pub fn lower_as_place(&mut self, expr_id: ExprId) -> Place {
         let expr = self.hir.expr(expr_id);
         match &expr.kind {
-            ExprKind::Var(var) => Place::local(self.lower_local(*var)),
+            ExprKind::Var(var) if self.hir.var(*var).global_id.is_none() => {
+                Place::local(self.lower_local(*var))
+            }
             ExprKind::Field { base, field } => {
                 let Ty::Named { fields, .. } = self.ty_ctx.get_ty(self.hir.expr(*base).ty) else {
                     unreachable!("field access of non-record type")
@@ -136,7 +144,8 @@ impl LowerInfo<'_, '_, '_> {
                 });
                 place
             }
-            ExprKind::Lit(_)
+            ExprKind::Var(_)
+            | ExprKind::Lit(_)
             | ExprKind::Tuple(_)
             | ExprKind::Infix(_, _, _)
             | ExprKind::Prefix(_, _)
@@ -214,7 +223,12 @@ impl LowerInfo<'_, '_, '_> {
                 self.block = merge_block;
             }
             ExprKind::Call { callee, args } => {
-                let callee = self.lower_as_value(*callee, true);
+                let callee = match &self.hir.expr(*callee).kind {
+                    ExprKind::Var(var) if let Some(def) = self.hir.var(*var).global_id => {
+                        Callee::Direct(def)
+                    }
+                    _ => Callee::Closure(self.lower_as_value(*callee, true)),
+                };
                 let args = args
                     .iter()
                     .map(|arg| {
