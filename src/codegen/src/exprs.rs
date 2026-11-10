@@ -18,15 +18,15 @@ use slotmap::SecondaryMap;
 
 use crate::CodegenState;
 
-impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
-    fn place_ty(&self, func: &'mir Func, place: &Place) -> TyId {
+impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
+    fn place_ty(&self, func: &'ext Func, place: &Place) -> TyId {
         match place.accesses.last() {
             Some(access) => access.ty,
             None => func.local(place.base).ty,
         }
     }
 
-    fn value_ty(&self, func: &'mir Func, value: &Value) -> TyId {
+    fn value_ty(&self, func: &'ext Func, value: &Value) -> TyId {
         match value {
             Value::Copy(place) | Value::Share(place) => self.place_ty(func, place),
             Value::Lit(lit_value) => match lit_value {
@@ -54,7 +54,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
-    fn emit_block_stmts(&mut self, func: &'mir Func, mir_block: BlockId) -> BasicBlock<'ctx> {
+    fn emit_block_stmts(&mut self, func: &'ext Func, mir_block: BlockId) -> BasicBlock<'ctx> {
         let llvm_block = self.ctx.append_basic_block(self.curr_function(), "");
         self.builder.position_at_end(llvm_block);
 
@@ -69,7 +69,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         &mut self,
         blocks: &SecondaryMap<BlockId, BasicBlock<'ctx>>,
         def: DefId,
-        func: &'mir Func,
+        func: &'ext Func,
         block: BlockId,
     ) {
         self.builder.position_at_end(blocks[block]);
@@ -124,7 +124,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
-    pub(crate) fn emit_stmt(&mut self, func: &'mir Func, stmt: &Stmt) {
+    pub(crate) fn emit_stmt(&mut self, func: &'ext Func, stmt: &Stmt) {
         match stmt {
             Stmt::Assign { place, expr } => {
                 let ty = self.place_ty(func, place);
@@ -142,7 +142,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
-    fn emit_expr(&mut self, func: &'mir Func, expr: &Expr) -> BasicValueEnum<'ctx> {
+    fn emit_expr(&mut self, func: &'ext Func, expr: &Expr) -> BasicValueEnum<'ctx> {
         match expr {
             Expr::Val(value) => self.emit_value(func, value),
             Expr::Infix(op, lhs, rhs) => self.emit_infix(func, *op, lhs, rhs),
@@ -151,7 +151,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
-    fn emit_value(&mut self, func: &'mir Func, value: &Value) -> BasicValueEnum<'ctx> {
+    fn emit_value(&mut self, func: &'ext Func, value: &Value) -> BasicValueEnum<'ctx> {
         match value {
             Value::Copy(place) => {
                 let ty = self.place_ty(func, place);
@@ -168,7 +168,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
-    fn emit_print(&mut self, func: &'mir Func, value: &Value) {
+    fn emit_print(&mut self, func: &'ext Func, value: &Value) {
         let ty = self.value_ty(func, value);
         let format = match self.ty_ctx.get_ty(ty) {
             Ty::Int => "%lld\n",
@@ -188,7 +188,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         self.build_c_call(self.printf(), &[format.into(), value.into()]);
     }
 
-    fn emit_place(&mut self, func: &'mir Func, place: &Place) -> PointerValue<'ctx> {
+    fn emit_place(&mut self, func: &'ext Func, place: &Place) -> PointerValue<'ctx> {
         let mut base = self.vars[place.base];
         let mut ty = func.local(place.base).ty;
 
@@ -236,7 +236,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
 
     fn emit_infix(
         &mut self,
-        func: &'mir Func,
+        func: &'ext Func,
         op: InfixOp,
         lhs: &Value,
         rhs: &Value,
@@ -340,7 +340,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
-    fn emit_prefix(&mut self, func: &'mir Func, op: PrefixOp, arg: &Value) -> BasicValueEnum<'ctx> {
+    fn emit_prefix(&mut self, func: &'ext Func, op: PrefixOp, arg: &Value) -> BasicValueEnum<'ctx> {
         let ty = self.value_ty(func, arg);
         let arg = self.emit_value(func, arg);
         match op {
@@ -358,7 +358,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
-    fn emit_call(&mut self, func: &'mir Func, callee: &Callee, args: &[Arg], dst: &Place) {
+    fn emit_call(&mut self, func: &'ext Func, callee: &Callee, args: &[Arg], dst: &Place) {
         let ret_ty = self.place_ty(func, dst);
         let dst = self.emit_place(func, dst);
 
@@ -387,7 +387,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
 
     fn emit_call_inner(
         &mut self,
-        func: &'mir Func,
+        func: &'ext Func,
         callee: &Callee,
         mut args: Vec<BasicMetadataValueEnum<'ctx>>,
     ) -> Option<BasicValueEnum<'ctx>> {
@@ -418,7 +418,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
-    fn emit_closure(&mut self, func: &'mir Func, body: DefId, env: &Value) -> BasicValueEnum<'ctx> {
+    fn emit_closure(&mut self, func: &'ext Func, body: DefId, env: &Value) -> BasicValueEnum<'ctx> {
         // Create the environment, if one is needed
         let (env_ptr, env_ty) = if let Value::Zst(_) = env {
             (self.const_null(), None)

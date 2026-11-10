@@ -38,6 +38,7 @@ use inkwell::{
 use slotmap::SecondaryMap;
 
 use irs::{
+    Package,
     mir::{LocalId, Mir},
     ty::{DefId, Param, StorageClass, Ty, TyContext, TyId},
 };
@@ -47,6 +48,7 @@ pub use config::*;
 /// # Panics
 /// Will panic if `target` is not a valid LLVM target triple.
 pub fn emit(
+    pkg: &Package,
     mir: &Mir,
     ty_ctx: &TyContext,
     opt_level: OptLevel,
@@ -55,12 +57,13 @@ pub fn emit(
     package_name: &str,
 ) {
     let ctx = Context::create();
-    CodegenState::new(mir, ty_ctx, &ctx, target, package_name).emit(opt_level, mode);
+    CodegenState::new(pkg, mir, ty_ctx, &ctx, target, package_name).emit(opt_level, mode);
 }
 
-struct CodegenState<'mir, 'ty_ctx, 'ctx> {
-    mir: &'mir Mir,
-    ty_ctx: &'ty_ctx TyContext,
+struct CodegenState<'ext, 'ctx> {
+    pkg: &'ext Package,
+    mir: &'ext Mir,
+    ty_ctx: &'ext TyContext,
     ctx: &'ctx Context,
     builder: Builder<'ctx>,
     module: Module<'ctx>,
@@ -68,17 +71,17 @@ struct CodegenState<'mir, 'ty_ctx, 'ctx> {
     field_orders: HashMap<TyId, Vec<u32>>,
     funcs: SecondaryMap<DefId, FunctionValue<'ctx>>,
     vars: SecondaryMap<LocalId, PointerValue<'ctx>>,
-    def: DefId,
 }
 
-impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
+impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
     /// Creates a new [`Codegen`] for a package with the given name.
     ///
     /// # Panics
     /// Panics if the target machine could not be created.
     fn new(
-        mir: &'mir Mir,
-        ty_ctx: &'ty_ctx TyContext,
+        pkg: &'ext Package,
+        mir: &'ext Mir,
+        ty_ctx: &'ext TyContext,
         ctx: &'ctx Context,
         target: Target,
         package_name: &str,
@@ -93,6 +96,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             .unwrap();
 
         Self {
+            pkg,
             mir,
             ty_ctx,
             ctx,
@@ -102,7 +106,6 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             field_orders: HashMap::new(),
             funcs: SecondaryMap::new(),
             vars: SecondaryMap::new(),
-            def: DefId::default(),
         }
     }
 
@@ -139,8 +142,7 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         // }
 
         for def in self.ty_ctx.defs() {
-            self.def = def;
-            self.emit_func_body();
+            self.emit_func_body(def);
         }
 
         self.module.verify().unwrap();
@@ -168,15 +170,15 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
         }
     }
 
-    fn emit_func_body(&mut self) {
-        let func = self.mir.func(self.def);
-        let llvm_func = self.funcs[self.def];
+    fn emit_func_body(&mut self, def: DefId) {
+        let func = self.mir.func(def);
+        let llvm_func = self.funcs[def];
 
         let setup_block = self.ctx.append_basic_block(llvm_func, "");
         self.builder.position_at_end(setup_block);
 
         // Skip the first argument if it would be an out-pointer.
-        let offset = if self.ty_ctx.is_indirect(self.ty_ctx.def(self.def).ret_ty) {
+        let offset = if self.ty_ctx.is_indirect(self.ty_ctx.def(def).ret_ty) {
             1
         } else {
             0
@@ -633,19 +635,17 @@ impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
             Ty::Tuple(elem_tys) => self.mangle_tuple(elem_tys),
             Ty::Func(params, ret_ty) => {
                 let param_names = params.iter().fold(String::new(), |mut s, p| {
-                    let prefix = if p.mutable { "M" } else { "P" };
+                    let prefix = if p.mutable { "M" } else { "" };
                     let _ = write!(s, "{prefix}{}", self.mangle_ty(p.ty));
                     s
                 });
                 format!("F{param_names}R{}", self.mangle_ty(*ret_ty))
             }
-            Ty::Named {
-                ident,
-                opaque,
-                fields,
-                ctor,
-                module,
-            } => todo!(),
+            Ty::Named { ident, module, .. } => {
+                let mut path = self.pkg.path_to(*module);
+                let _ = write!(path, "::{ident}");
+                path
+            }
             Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }

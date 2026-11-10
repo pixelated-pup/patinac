@@ -5,6 +5,8 @@ pub mod hir;
 pub mod mir;
 pub mod ty;
 
+use std::fmt::Write as _;
+
 use slotmap::{SlotMap, new_key_type};
 
 use ident::Ident;
@@ -42,6 +44,22 @@ impl Package {
     /// Inserts the provided module into the package, returning an ID for it.
     pub fn insert(&mut self, module: Module) -> ModuleId {
         self.modules.insert(module)
+    }
+
+    /// Returns the textual path to the given module.
+    pub fn path_to(&self, module: ModuleId) -> String {
+        fn inner(this: &Package, module: ModuleId, buf: &mut String) {
+            let module = &this.modules[module];
+            if let Some(parent) = module.parent {
+                inner(this, parent, buf);
+                buf.push_str("::");
+            }
+            let _ = write!(buf, "{}", module.name);
+        }
+
+        let mut buf = String::new();
+        inner(self, module, &mut buf);
+        buf
     }
 }
 

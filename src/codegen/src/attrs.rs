@@ -26,7 +26,7 @@ fn attr_id(name: &str) -> u32 {
     id
 }
 
-impl<'mir, 'ty_ctx, 'ctx> CodegenState<'mir, 'ty_ctx, 'ctx> {
+impl<'ctx> CodegenState<'_, 'ctx> {
     attr!(sret with ty);
     attr!(nonnull);
     attr!(noundef);

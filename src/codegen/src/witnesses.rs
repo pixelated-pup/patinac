@@ -8,7 +8,7 @@ use irs::ty::TyId;
 
 use crate::CodegenState;
 
-impl<'ctx> CodegenState<'_, '_, 'ctx> {
+impl<'ctx> CodegenState<'_, 'ctx> {
     pub(crate) fn drop_func_ty(&self) -> FunctionType<'ctx> {
         self.ctx.void_type().fn_type(&[self.ptr_ty().into()], false)
     }
