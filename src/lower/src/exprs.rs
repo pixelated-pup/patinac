@@ -5,7 +5,7 @@ use ident::Ident;
 use irs::{
     hir::{self, ExprId, ExprKind, LitExpr, VarId},
     mir::{self, Callee, FieldAccess, Func, Local, LocalId, Place, Terminator, Value},
-    ty::{DefInfo, Param, Ty, TyId},
+    ty::{DefInfo, Param, Parent, Ty, TyId},
 };
 
 use crate::LowerInfo;
@@ -365,8 +365,8 @@ impl LowerInfo<'_, '_, '_> {
             env.accesses.pop();
         }
 
-        // Create a distinct name for the lifted function.
-        let func_name = format!("_{}::closure{}", self.def().ident, self.lambda_counter);
+        // Create a locally distinct name for the lifted function.
+        let func_name = format!("closure{}", self.lambda_counter);
         self.lambda_counter += 1;
 
         // Construct the lifted function.
@@ -374,6 +374,7 @@ impl LowerInfo<'_, '_, '_> {
         let def = self.ty_ctx.add_def(DefInfo {
             ident: Ident::new(&func_name),
             module: self.def().module,
+            parent: Some(Parent::Def(self.def)),
             params: params
                 .iter()
                 .map(|var| {

@@ -3,24 +3,60 @@
 //! All mangled symbols consist exclusively of a-z, A-Z, 0-9, and _.
 //! Unicode characters in identifiers are encoded with punycode, and hyphens in the punycode are replaced with underscores.
 
-use std::fmt::{self, Display, Formatter};
+use std::fmt::{self, Display, Formatter, Write as _};
 
 use ident::Ident;
 use idna::punycode;
 use irs::{
     ModuleId, Package,
-    ty::{DefId, Ty, TyContext, TyId},
+    ty::{DefId, Parent, Ty, TyContext, TyId},
 };
 
 const PREFIX: &str = "_P";
 
+pub struct SymbolBuilder<'ext> {
+    pkg: &'ext Package,
+    ty_ctx: &'ext TyContext,
+    buf: String,
+}
+
+impl<'ext> SymbolBuilder<'ext> {
+    pub fn new(pkg: &'ext Package, ty_ctx: &'ext TyContext) -> Self {
+        Self {
+            pkg,
+            ty_ctx,
+            buf: String::from(PREFIX),
+        }
+    }
+}
+
 /// Produces a mangled symbol for the given function.
 pub fn mangle_func(pkg: &Package, ty_ctx: &TyContext, func: DefId) -> String {
     let func = ty_ctx.def(func);
-    format!(
-        "{PREFIX}{}",
-        PathMangler::new(pkg, func.module, Some(func.ident))
-    )
+    match func.parent {
+        Some(Parent::Impl(ty)) => {
+            format!(
+                "{PREFIX}A{}{}",
+                TyMangler::new(pkg, ty_ctx, ty),
+                IdentMangler(func.ident),
+            )
+        }
+        Some(Parent::Def(def)) => {
+            let parent = ty_ctx.def(def);
+            PathBuilder::new(pkg, module)
+            format!(
+                "{PREFIX}{}{}",
+                PathMangler::new(pkg, parent.module, Some(parent.ident)),
+                IdentMangler(func.ident),
+            )
+        }
+        None => {
+            format!(
+                "{PREFIX}{}",
+                PathMangler::new(pkg, func.module, Some(func.ident)),
+            )
+        }
+    }
 }
 
 /// Produces a mangled symbol for an associated function with the given name
@@ -36,20 +72,15 @@ pub fn mangle_assoc_func(pkg: &Package, ty_ctx: &TyContext, ty: TyId, name: Iden
 struct PathMangler<'ext> {
     pkg: &'ext Package,
     module: ModuleId,
-    end: Option<Ident>,
 }
 
 impl<'ext> PathMangler<'ext> {
-    fn new(pkg: &'ext Package, module: ModuleId, end: Option<Ident>) -> Self {
-        Self { pkg, module, end }
+    fn new(pkg: &'ext Package, module: ModuleId) -> Self {
+        Self { pkg, module }
     }
 
     fn with(self, module: ModuleId) -> Self {
-        Self {
-            module,
-            end: None,
-            pkg: self.pkg,
-        }
+        Self { module, ..self }
     }
 }
 
@@ -57,15 +88,59 @@ impl Display for PathMangler<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let module = self.pkg.get(self.module);
         match module.parent {
-            Some(parent) => write!(f, "N{}{}", self.with(parent), IdentMangler(module.name))?,
-            None => write!(f, "R{}", IdentMangler(module.name))?,
+            Some(parent) => write!(f, "N{}{}", self.with(parent), IdentMangler(module.name)),
+            None => write!(f, "R{}", IdentMangler(module.name)),
+        }
+    }
+}
+
+fn mangle_module_path(pkg: &Package, module: ModuleId, buf: &mut String) {
+    let module = pkg.get(module);
+    match module.parent {
+        Some(parent) => {
+            buf.push('N');
+            mangle_module_path(pkg, parent, buf);
+            let _ = write!(buf, "{}", IdentMangler(module.name));
+        }
+        None => {
+            let _ = write!(buf, "R{}", IdentMangler(module.name));
+        }
+    }
+}
+
+struct PathBuilder<'ext> {
+    pkg: &'ext Package,
+    buf: String,
+}
+
+impl<'ext> PathBuilder<'ext> {
+    fn new(pkg: &'ext Package, module: ModuleId) -> Self {
+        fn mangle_module(pkg: &Package, module: ModuleId, buf: &mut String) {
+            let module = pkg.get(module);
+            match module.parent {
+                Some(parent) => {
+                    buf.push('N');
+                    mangle_module(pkg, parent, buf);
+                    let _ = write!(buf, "{}", IdentMangler(module.name));
+                }
+                None => {
+                    let _ = write!(buf, "R{}", IdentMangler(module.name));
+                }
+            }
         }
 
-        if let Some(end) = self.end {
-            write!(f, "{}", IdentMangler(end))?;
-        }
+        let mut buf = String::new();
+        mangle_module(pkg, module, &mut buf);
+        Self { pkg, buf }
+    }
 
-        Ok(())
+    fn add(mut self, ident: Ident) -> Self {
+        let _ = write!(self.buf, "{}", IdentMangler(ident));
+        self
+    }
+
+    fn finish(self) -> String {
+        self.buf
     }
 }
 
@@ -111,9 +186,9 @@ impl Display for TyMangler<'_> {
         match self.ty_ctx.get_ty(self.ty) {
             Ty::Int => "i".fmt(f),
             Ty::UInt => "u".fmt(f),
-            Ty::Byte => "h".fmt(f),
+            Ty::Byte => "b".fmt(f),
             Ty::Float => "f".fmt(f),
-            Ty::Bool => "b".fmt(f),
+            Ty::Bool => "l".fmt(f),
             Ty::Tuple(elem_tys) => {
                 "T".fmt(f)?;
                 for ty in elem_tys {

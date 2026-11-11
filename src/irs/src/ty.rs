@@ -287,12 +287,24 @@ pub struct DefInfo {
     pub ident: Ident,
     /// The module containing the definition.
     pub module: ModuleId,
+    /// The parent that contains this definition, used for name mangling.
+    /// If this is `None`, the `module` is used in the mangled name instead.
+    pub parent: Option<Parent>,
     /// The type information for the definition's parameters.
     /// Empty if it's a constant.
     pub params: Vec<Param>,
     /// The return type of the definiton if it's a function,
     /// or the type of the definition if it's a constant.
     pub ret_ty: TyId,
+}
+
+#[derive(Clone, Copy, Debug)]
+/// The parent of a definition.
+pub enum Parent {
+    /// An impl block for the given type.
+    Impl(TyId),
+    /// Another definition. Used for closures.
+    Def(DefId),
 }
 
 /// An ID representing an interned type. Information about the type can be acquired through [`Hir::ty_kind`].
