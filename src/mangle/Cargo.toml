@@ -1,0 +1,14 @@
+[package]
+name = "mangle"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Internal
+ident.path = "../ident"
+irs.path = "../irs"
+# External
+idna = "^1"
+
+[lints]
+workspace = true

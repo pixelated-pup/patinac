@@ -1,3 +1,4 @@
+use ident::Ident;
 use inkwell::{
     IntPredicate,
     types::{BasicType, FunctionType},
@@ -39,10 +40,9 @@ impl<'ctx> CodegenState<'_, 'ctx> {
     pub fn fields_drop(
         &mut self,
         ty: TyId,
-        ty_name: &str,
         fields: impl IntoIterator<Item = TyId>,
     ) -> FunctionValue<'ctx> {
-        let name = format!("{ty_name}.drop");
+        let name = mangle::mangle_assoc_func(self.pkg, self.ty_ctx, ty, Ident::new("drop"));
 
         // Check if we already built this function
         if let Some(func) = self.module.get_function(&name) {

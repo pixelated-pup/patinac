@@ -115,7 +115,7 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         for def in self.ty_ctx.defs() {
             let def_info = self.ty_ctx.def(def);
 
-            let name = Self::mangle_name(def_info.ident.to_string());
+            let name = mangle::mangle_func(self.pkg, self.ty_ctx, def);
             let func_ty = self.func_ty(&def_info.params, def_info.ret_ty, false);
 
             let func = self.add_func(&name, func_ty, false);
@@ -618,45 +618,5 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         self.curr_block()
             .get_parent()
             .expect("builder is within function")
-    }
-
-    fn mangle_name(mut name: String) -> String {
-        name.insert(0, '_');
-        name
-    }
-
-    fn mangle_ty(&self, ty: TyId) -> String {
-        match self.ty_ctx.get_ty(ty) {
-            Ty::Int => "i".to_string(),
-            Ty::UInt => "u".to_string(),
-            Ty::Byte => "h".to_string(),
-            Ty::Float => "f".to_string(),
-            Ty::Bool => "b".to_string(),
-            Ty::Tuple(elem_tys) => self.mangle_tuple(elem_tys),
-            Ty::Func(params, ret_ty) => {
-                let param_names = params.iter().fold(String::new(), |mut s, p| {
-                    let prefix = if p.mutable { "M" } else { "" };
-                    let _ = write!(s, "{prefix}{}", self.mangle_ty(p.ty));
-                    s
-                });
-                format!("F{param_names}R{}", self.mangle_ty(*ret_ty))
-            }
-            Ty::Named { ident, module, .. } => {
-                let mut path = self.pkg.path_to(*module);
-                let _ = write!(path, "::{ident}");
-                path
-            }
-            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
-        }
-    }
-
-    fn mangle_tuple(&self, elem_tys: &[TyId]) -> String {
-        format!(
-            "({})",
-            elem_tys
-                .iter()
-                .map(|ty| self.mangle_ty(*ty))
-                .collect::<String>()
-        )
     }
 }

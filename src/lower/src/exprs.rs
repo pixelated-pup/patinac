@@ -370,7 +370,7 @@ impl LowerInfo<'_, '_, '_> {
         self.lambda_counter += 1;
 
         // Construct the lifted function.
-        let mut body_func = Func::new(params.len() + 1);
+        let mut func = Func::new(params.len() + 1);
         let def = self.ty_ctx.add_def(DefInfo {
             ident: Ident::new(&func_name),
             module: self.def().module,
@@ -392,10 +392,10 @@ impl LowerInfo<'_, '_, '_> {
             self.handler,
             self.mir,
             def,
-            &mut body_func,
+            &mut func,
         );
-        builder.lift_lambda_body(params, captures, body, env_ty);
-        self.mir.add_func(def, body_func);
+        builder.lower_lambda_body(params, captures, body, env_ty);
+        self.mir.add_func(def, func);
 
         mir::Expr::Closure {
             body: def,
@@ -403,7 +403,7 @@ impl LowerInfo<'_, '_, '_> {
         }
     }
 
-    fn lift_lambda_body(
+    fn lower_lambda_body(
         &mut self,
         params: &[VarId],
         captures: &[VarId],

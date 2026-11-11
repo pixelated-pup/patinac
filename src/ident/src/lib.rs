@@ -93,3 +93,9 @@ impl Deref for StrGuard<'_> {
         get_str(&self.guard, self.ident)
     }
 }
+
+impl Display for StrGuard<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        self.deref().fmt(f)
+    }
+}

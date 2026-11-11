@@ -60,15 +60,25 @@ impl OptLevel {
 #[derive(Debug, Clone, Copy)]
 #[expect(clippy::doc_markdown, reason = "false positive")]
 pub enum Target {
-    /// Windows on `x86_64`.
-    X86_64Windows,
-    /// Linux on `x86_64`.
-    X86_64Linux,
-    /// Windows on `ARM64`/`aarch64`.
-    Arm64Windows,
-    /// Linux on `ARM64`/`aarch64`.
+    /// Windows on x86_64 using the MSVC toolchain (`x86_64-pc-windows-msvc`).
+    ///
+    /// Requires VS2022+. Uses the `x64` calling convention for C functions. Produces PE binaries.
+    X86_64WindowsMSVC,
+    /// Windows on x86_64 using the GNU toolchain (`x86_64-pc-windows-gnu`).
+    ///
+    /// Uses the `x64` calling convention for C functions. Produces PE binaries.
+    X86_64WindowsGNU,
+    /// Windows on ARM64/aarch64 using the MSVC toolchain (`aarch64-pc-windows-msvc`).
+    ///
+    /// Requires VS2022+. Uses the `ARM64` calling convention for C functions. Produces PE binaries.
+    Arm64WindowsMSVC,
+    /// Linux on x86_64 using the GNU toolchain (`x86_64-unknown-linux-gnu`).
+    X86_64LinuxGNU,
+    /// Linux on ARM64/aarch64 using the GNU toolchain (`aarch64-unknown-linux-gnu`).
     Arm64Linux,
-    /// MacOS on `ARM64`/`aarch64`.
+    /// MacOS on ARM64/aarch64 (`aarch64-apple-darwin`).
+    ///
+    /// Requires Xcode??. Produces Mach-O binaries.
     Arm64Mac,
 }
 
@@ -77,7 +87,7 @@ impl Target {
     pub const fn host() -> Option<Self> {
         cfg_select! {
             all(target_arch = "x86_64", target_os = "windows") => Some(Self::X86_64Windows),
-            all(target_arch = "x86_64", target_os = "linux") => Some(Self::X86_64Linux),
+            all(target_arch = "x86_64", target_os = "linux") => Some(Self::X86_64LinuxGNU),
             all(target_arch = "aarch64", target_os = "windows") => Some(Self::Arm64Windows),
             all(target_arch = "aarch64", target_os = "linux") => Some(Self::Arm64Linux),
             all(target_arch = "aarch64", target_os = "macos") => Some(Self::Arm64Mac),
@@ -88,10 +98,11 @@ impl Target {
     /// Returns the LLVM target triple corresponding to this target.
     pub fn triple(self) -> TargetTriple {
         let name = match self {
-            Self::X86_64Windows => "x86_64-pc-windows",
-            Self::X86_64Linux => "x86_64-unknown-linux",
-            Self::Arm64Windows => "aarch64-pc-windows",
-            Self::Arm64Linux => "aarch64-unknown-linux",
+            Self::X86_64WindowsMSVC => "x86_64-pc-windows-msvc",
+            Self::X86_64WindowsGNU => "x86_64-pc-windows-gnu",
+            Self::Arm64WindowsMSVC => "aarch64-pc-windows-msvc",
+            Self::X86_64LinuxGNU => "x86_64-unknown-linux-gnu",
+            Self::Arm64Linux => "aarch64-unknown-linux-gnu",
             Self::Arm64Mac => "aarch64-apple-darwin",
         };
         TargetTriple::create(name)
@@ -100,7 +111,7 @@ impl Target {
 
 impl Default for Target {
     fn default() -> Self {
-        Self::host().unwrap_or(Self::X86_64Linux)
+        Self::host().unwrap_or(Self::X86_64LinuxGNU)
     }
 }
 
@@ -111,9 +122,9 @@ fn validate_triples() {
     LLVMTarget::initialize_all(&InitializationConfig::default());
 
     let targets = [
-        Target::X86_64Windows,
-        Target::X86_64Linux,
-        Target::Arm64Windows,
+        Target::X86_64WindowsMSVC,
+        Target::X86_64LinuxGNU,
+        Target::Arm64WindowsMSVC,
         Target::Arm64Linux,
         Target::Arm64Mac,
     ];

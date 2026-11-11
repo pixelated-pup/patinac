@@ -46,6 +46,11 @@ impl Package {
         self.modules.insert(module)
     }
 
+    /// Returns the name of this package.
+    pub fn name(&self) -> Ident {
+        self.modules[self.root_id].name
+    }
+
     /// Returns the textual path to the given module.
     pub fn path_to(&self, module: ModuleId) -> String {
         fn inner(this: &Package, module: ModuleId, buf: &mut String) {

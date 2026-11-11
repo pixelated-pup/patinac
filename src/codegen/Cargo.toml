@@ -5,7 +5,9 @@ edition = "2024"
 
 [dependencies]
 # Internal
+ident.path = "../ident"
 irs.path = "../irs"
+mangle.path = "../mangle"
 # External
 foldhash = "0.2.0"
 inkwell = { version = "0.9.0", features = ["llvm22-1"] }
