@@ -3,7 +3,7 @@
 //! All mangled symbols consist exclusively of a-z, A-Z, 0-9, and _.
 //! Unicode characters in identifiers are encoded with punycode, and hyphens in the punycode are replaced with underscores.
 
-use std::fmt::{self, Display, Formatter, Write as _};
+use std::fmt::Write as _;
 
 use ident::Ident;
 use idna::punycode;
@@ -14,84 +14,54 @@ use irs::{
 
 const PREFIX: &str = "_P";
 
-pub struct SymbolBuilder<'ext> {
-    pkg: &'ext Package,
-    ty_ctx: &'ext TyContext,
-    buf: String,
-}
-
-impl<'ext> SymbolBuilder<'ext> {
-    pub fn new(pkg: &'ext Package, ty_ctx: &'ext TyContext) -> Self {
-        Self {
-            pkg,
-            ty_ctx,
-            buf: String::from(PREFIX),
-        }
-    }
-}
-
 /// Produces a mangled symbol for the given function.
 pub fn mangle_func(pkg: &Package, ty_ctx: &TyContext, func: DefId) -> String {
+    let mut buf = String::from(PREFIX);
     let func = ty_ctx.def(func);
+
     match func.parent {
-        Some(Parent::Impl(ty)) => {
-            format!(
-                "{PREFIX}A{}{}",
-                TyMangler::new(pkg, ty_ctx, ty),
-                IdentMangler(func.ident),
-            )
-        }
+        Some(Parent::Impl(ty)) => mangle_assoc_item(pkg, ty_ctx, ty, func.ident, &mut buf),
         Some(Parent::Def(def)) => {
             let parent = ty_ctx.def(def);
-            PathBuilder::new(pkg, module)
-            format!(
-                "{PREFIX}{}{}",
-                PathMangler::new(pkg, parent.module, Some(parent.ident)),
-                IdentMangler(func.ident),
-            )
+            buf.push('N');
+            mangle_module_item(pkg, parent.module, parent.ident, &mut buf);
+            mangle_ident(func.ident, &mut buf);
         }
-        None => {
-            format!(
-                "{PREFIX}{}",
-                PathMangler::new(pkg, func.module, Some(func.ident)),
-            )
-        }
-    }
-}
-
-/// Produces a mangled symbol for an associated function with the given name
-pub fn mangle_assoc_func(pkg: &Package, ty_ctx: &TyContext, ty: TyId, name: Ident) -> String {
-    format!(
-        "{PREFIX}A{}{}",
-        TyMangler::new(pkg, ty_ctx, ty),
-        IdentMangler(name)
-    )
-}
-
-#[derive(Clone, Copy)]
-struct PathMangler<'ext> {
-    pkg: &'ext Package,
-    module: ModuleId,
-}
-
-impl<'ext> PathMangler<'ext> {
-    fn new(pkg: &'ext Package, module: ModuleId) -> Self {
-        Self { pkg, module }
+        None => mangle_module_item(pkg, func.module, func.ident, &mut buf),
     }
 
-    fn with(self, module: ModuleId) -> Self {
-        Self { module, ..self }
-    }
+    buf
 }
 
-impl Display for PathMangler<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let module = self.pkg.get(self.module);
-        match module.parent {
-            Some(parent) => write!(f, "N{}{}", self.with(parent), IdentMangler(module.name)),
-            None => write!(f, "R{}", IdentMangler(module.name)),
-        }
-    }
+/// Produces a mangled symbol for an associated item with the given name
+pub fn assoc_item_symbol(pkg: &Package, ty_ctx: &TyContext, ty: TyId, ident: Ident) -> String {
+    let mut buf = String::from(PREFIX);
+    mangle_assoc_item(pkg, ty_ctx, ty, ident, &mut buf);
+    buf
+}
+
+fn mangle_assoc_item(pkg: &Package, ty_ctx: &TyContext, ty: TyId, ident: Ident, buf: &mut String) {
+    buf.push('N');
+    mangle_assoc_path(pkg, ty_ctx, ty, buf);
+    mangle_ident(ident, buf);
+}
+
+fn mangle_assoc_path(pkg: &Package, ty_ctx: &TyContext, ty: TyId, buf: &mut String) {
+    buf.push('A');
+    mangle_ty(pkg, ty_ctx, ty, buf);
+}
+
+/// Produces a mangled symbol for an item with the given name and module
+pub fn module_item_symbol(pkg: &Package, module: ModuleId, ident: Ident) -> String {
+    let mut buf = String::from(PREFIX);
+    mangle_module_item(pkg, module, ident, &mut buf);
+    buf
+}
+
+fn mangle_module_item(pkg: &Package, module: ModuleId, ident: Ident, buf: &mut String) {
+    buf.push('N');
+    mangle_module_path(pkg, module, buf);
+    mangle_ident(ident, buf);
 }
 
 fn mangle_module_path(pkg: &Package, module: ModuleId, buf: &mut String) {
@@ -100,116 +70,66 @@ fn mangle_module_path(pkg: &Package, module: ModuleId, buf: &mut String) {
         Some(parent) => {
             buf.push('N');
             mangle_module_path(pkg, parent, buf);
-            let _ = write!(buf, "{}", IdentMangler(module.name));
+            mangle_ident(module.name, buf);
         }
         None => {
-            let _ = write!(buf, "R{}", IdentMangler(module.name));
-        }
-    }
-}
-
-struct PathBuilder<'ext> {
-    pkg: &'ext Package,
-    buf: String,
-}
-
-impl<'ext> PathBuilder<'ext> {
-    fn new(pkg: &'ext Package, module: ModuleId) -> Self {
-        fn mangle_module(pkg: &Package, module: ModuleId, buf: &mut String) {
-            let module = pkg.get(module);
-            match module.parent {
-                Some(parent) => {
-                    buf.push('N');
-                    mangle_module(pkg, parent, buf);
-                    let _ = write!(buf, "{}", IdentMangler(module.name));
-                }
-                None => {
-                    let _ = write!(buf, "R{}", IdentMangler(module.name));
-                }
-            }
-        }
-
-        let mut buf = String::new();
-        mangle_module(pkg, module, &mut buf);
-        Self { pkg, buf }
-    }
-
-    fn add(mut self, ident: Ident) -> Self {
-        let _ = write!(self.buf, "{}", IdentMangler(ident));
-        self
-    }
-
-    fn finish(self) -> String {
-        self.buf
-    }
-}
-
-#[derive(Clone, Copy)]
-struct IdentMangler(Ident);
-
-impl Display for IdentMangler {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let str = self.0.str();
-        if str.is_ascii() {
-            write!(f, "{}{str}", str.len())
-        } else {
-            let punycode = punycode::encode_str(&str).unwrap().replace("-", "_");
-            write!(f, "u{}{punycode}", str.len())
+            buf.push('R');
+            mangle_ident(module.name, buf);
         }
     }
 }
 
 /// Produces a mangled symbol for the given type.
-pub fn mangle_ty(pkg: &Package, ty_ctx: &TyContext, ty: TyId) -> String {
-    format!("{PREFIX}{}", TyMangler::new(pkg, ty_ctx, ty))
-}
+// pub fn mangle_ty(pkg: &Package, ty_ctx: &TyContext, ty: TyId) -> String {
+//     format!("{PREFIX}{}", TyMangler::new(pkg, ty_ctx, ty))
+// }
 
-#[derive(Clone, Copy)]
-struct TyMangler<'ext> {
-    pkg: &'ext Package,
-    ty_ctx: &'ext TyContext,
-    ty: TyId,
-}
-
-impl<'ext> TyMangler<'ext> {
-    fn new(pkg: &'ext Package, ty_ctx: &'ext TyContext, ty: TyId) -> Self {
-        Self { pkg, ty_ctx, ty }
-    }
-
-    fn with(self, ty: TyId) -> Self {
-        Self { ty, ..self }
-    }
-}
-
-impl Display for TyMangler<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self.ty_ctx.get_ty(self.ty) {
-            Ty::Int => "i".fmt(f),
-            Ty::UInt => "u".fmt(f),
-            Ty::Byte => "b".fmt(f),
-            Ty::Float => "f".fmt(f),
-            Ty::Bool => "l".fmt(f),
-            Ty::Tuple(elem_tys) => {
-                "T".fmt(f)?;
-                for ty in elem_tys {
-                    self.with(*ty).fmt(f)?;
-                }
-                "E".fmt(f)
+fn mangle_ty(pkg: &Package, ty_ctx: &TyContext, ty: TyId, buf: &mut String) {
+    match ty_ctx.get_ty(ty) {
+        Ty::Int => buf.push('i'),
+        Ty::UInt => buf.push('u'),
+        Ty::Byte => buf.push('b'),
+        Ty::Float => buf.push('f'),
+        Ty::Bool => buf.push('l'),
+        Ty::Tuple(elem_tys) => {
+            buf.push('T');
+            for &elem_ty in elem_tys {
+                mangle_ty(pkg, ty_ctx, elem_ty, buf);
             }
-            Ty::Func(params, ret_ty) => {
-                for param in params {
-                    if param.mutable {
-                        "M".fmt(f)?;
-                    }
-                    self.with(param.ty).fmt(f)?;
-                }
-                "E".fmt(f)?;
-                self.with(*ret_ty).fmt(f)
-            }
-            Ty::Named { ident, module, .. } => {
-                PathMangler::new(self.pkg, *module, Some(*ident)).fmt(f)
-            }
-            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Tried to mangle type variable"),
+            buf.push('E');
         }
+        Ty::Func(params, ret_ty) => {
+            buf.push('F');
+            for param in params {
+                if param.mutable {
+                    buf.push('M');
+                }
+                mangle_ty(pkg, ty_ctx, param.ty, buf);
+            }
+            buf.push('E');
+            mangle_ty(pkg, ty_ctx, *ret_ty, buf);
+        }
+        Ty::Named { ident, module, .. } => mangle_module_item(pkg, *module, *ident, buf),
+        Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Tried to mangle type variable"),
+    }
+}
+
+fn mangle_ident(ident: Ident, buf: &mut String) {
+    fn debug_assert_valid(str: &str) {
+        debug_assert!(
+            str.bytes()
+                .all(|b| matches!(b, b'a'..b'z' | b'A'..b'Z' | b'0'..b'9' | b'_'))
+        );
+    }
+
+    let str = ident.str();
+
+    if str.is_ascii() {
+        debug_assert_valid(&str);
+        let _ = write!(buf, "{}{str}", str.len());
+    } else {
+        let punycode = punycode::encode_str(&str).unwrap().replace("-", "_");
+        debug_assert_valid(&punycode);
+        let _ = write!(buf, "u{}{punycode}", str.len());
     }
 }
