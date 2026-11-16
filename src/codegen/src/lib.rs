@@ -14,12 +14,11 @@ mod exprs;
 mod runtime;
 mod witnesses;
 
-use std::{fmt::Write as _, iter};
+use std::iter;
 
 use foldhash::{HashMap, HashMapExt as _};
 use inkwell::{
     AddressSpace, FloatPredicate, IntPredicate,
-    attributes::Attribute,
     basic_block::BasicBlock,
     builder::Builder,
     context::Context,
@@ -478,7 +477,22 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
                 self.build_call(func, &[place.into()]);
             }
             Ty::Func(_, _) => {
-                self.build_call(self.any_closure_drop(), &[place.into()]);
+                let drop_func = self
+                    .builder
+                    .build_struct_gep(self.closure_ty(), place, 2, "")
+                    .unwrap();
+                let drop_func = self
+                    .builder
+                    .build_load(self.ptr_ty(), drop_func, "")
+                    .unwrap();
+                self.builder
+                    .build_indirect_call(
+                        self.drop_func_ty(),
+                        drop_func.into_pointer_value(),
+                        &[place.into()],
+                        "",
+                    )
+                    .unwrap();
             }
             Ty::Named { fields, .. } => {
                 let func = self.fields_drop(ty, fields.values());
@@ -505,7 +519,22 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
                 self.build_call(func, &[dst.into(), src.into()]);
             }
             Ty::Func(_, _) => {
-                self.build_call(self.any_closure_copy(), &[dst.into(), src.into()]);
+                let copy_func = self
+                    .builder
+                    .build_struct_gep(self.closure_ty(), src, 3, "")
+                    .unwrap();
+                let copy_func = self
+                    .builder
+                    .build_load(self.ptr_ty(), copy_func, "")
+                    .unwrap();
+                self.builder
+                    .build_indirect_call(
+                        self.copy_func_ty(),
+                        copy_func.into_pointer_value(),
+                        &[dst.into(), src.into()],
+                        "",
+                    )
+                    .unwrap();
             }
             Ty::Named { fields, .. } => {
                 let func = self.fields_copy(ty, fields.values());
@@ -569,10 +598,24 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
                     .unwrap()
                     .into_int_value()
             }
-            Ty::Func(_, _) => self
-                .build_call(self.any_closure_equals(), &[lhs.into(), rhs.into()])
-                .unwrap()
-                .into_int_value(),
+            Ty::Func(_, _) => {
+                // Load the function pointers, which are stored first in the closures.
+                let lhs_func = self
+                    .builder
+                    .build_load(self.ptr_ty(), lhs.into_pointer_value(), "")
+                    .unwrap()
+                    .into_pointer_value();
+                let rhs_func = self
+                    .builder
+                    .build_load(self.ptr_ty(), rhs.into_pointer_value(), "")
+                    .unwrap()
+                    .into_pointer_value();
+
+                // Test whether the function pointers are equal.
+                self.builder
+                    .build_int_compare(IntPredicate::EQ, lhs_func, rhs_func, "")
+                    .unwrap()
+            }
             Ty::Named { fields, .. } => {
                 let func = self.fields_equals(ty, fields.values());
                 self.build_call(func, &[lhs.into(), rhs.into()])

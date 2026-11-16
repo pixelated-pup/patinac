@@ -38,10 +38,6 @@ impl LowerInfo<'_, '_, '_> {
                 captures,
                 body,
             } => self.lower_lambda(params, captures, *body),
-            // Fast path for single-expression blocks, mainly intended for arithmetic where blocks are used for precedence
-            ExprKind::Block(block) if let [hir::Stmt::Expr(expr)] = block.stmts.as_slice() => {
-                self.lower_as_expr(*expr)
-            }
 
             ExprKind::Var(_)
             | ExprKind::Lit(_)
@@ -370,7 +366,7 @@ impl LowerInfo<'_, '_, '_> {
         }
 
         // Create a locally distinct name for the lifted function.
-        let func_name = format!("closure{}", self.lambda_counter);
+        let func_name = format!("_closure{}", self.lambda_counter);
         self.lambda_counter += 1;
 
         // Construct the lifted function.

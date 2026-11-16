@@ -435,28 +435,28 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
             (env_ptr, Some(env_ty))
         };
 
-        // Set up the closure.
-        let name = self.ty_ctx.def(body).ident.str();
-        let body = self.funcs[body];
-        let ty = self.closure_ty();
-        let closure = self.build_alloca(ty, "");
-
         // Create the witness functions.
         let drop = self
-            .closure_drop(&name, env_ty)
+            .closure_drop(body, env_ty)
             .as_global_value()
             .as_pointer_value();
         let copy = self
-            .closure_copy(&name, env_ty)
+            .closure_copy(body, env_ty)
             .as_global_value()
             .as_pointer_value();
 
-        // Store everything into the closure, emitting the witness functions along the way.
+        // Store everything into the closure.
+        let ty = self.closure_ty();
+        let closure = self.build_alloca(ty, "");
         let store = |this: &Self, idx, val| {
             let ptr = this.builder.build_struct_gep(ty, closure, idx, "").unwrap();
             this.builder.build_store(ptr, val).unwrap();
         };
-        store(self, 0, body.as_global_value().as_pointer_value());
+        store(
+            self,
+            0,
+            self.funcs[body].as_global_value().as_pointer_value(),
+        );
         store(self, 1, env_ptr);
         store(self, 2, drop);
         store(self, 3, copy);

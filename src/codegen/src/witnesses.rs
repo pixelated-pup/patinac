@@ -1,11 +1,10 @@
 use ident::Ident;
 use inkwell::{
-    IntPredicate,
     types::{BasicType, FunctionType},
     values::{BasicValue as _, FunctionValue},
 };
 
-use irs::ty::TyId;
+use irs::ty::{DefId, TyId};
 
 use crate::CodegenState;
 
@@ -24,7 +23,7 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         self.ctx.bool_type().fn_type(&[ptr, ptr], false)
     }
 
-    pub fn fields_drop<'fields>(
+    pub(crate) fn fields_drop<'fields>(
         &mut self,
         ty: TyId,
         fields: impl IntoIterator<Item = &'fields TyId>,
@@ -56,7 +55,7 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         func
     }
 
-    pub fn fields_copy<'fields>(
+    pub(crate) fn fields_copy<'fields>(
         &mut self,
         ty: TyId,
         fields: impl IntoIterator<Item = &'fields TyId>,
@@ -95,7 +94,7 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         func
     }
 
-    pub fn fields_equals<'fields>(
+    pub(crate) fn fields_equals<'fields>(
         &mut self,
         ty: TyId,
         fields: impl IntoIterator<Item = &'fields TyId>,
@@ -153,126 +152,13 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         func
     }
 
-    pub(crate) fn any_closure_drop(&self) -> FunctionValue<'ctx> {
-        let func_name = todo!();
-
-        // Check if we already built this function
-        if let Some(func) = self.module.get_function(func_name) {
-            return func;
-        }
-
-        // Save the builder's current insertion block to restore at the end
-        let old_insert_block = self.builder.get_insert_block().unwrap();
-
-        let func = self.add_func(func_name, self.drop_func_ty(), false);
-        self.builder
-            .position_at_end(self.ctx.append_basic_block(func, "entry"));
-        let val = func.get_first_param().unwrap();
-        let drop_func = self
-            .builder
-            .build_struct_gep(self.closure_ty(), val.into_pointer_value(), 2, "dropfn")
-            .unwrap();
-        let drop_func = self
-            .builder
-            .build_load(self.ptr_ty(), drop_func, "dropfn")
-            .unwrap();
-        self.builder
-            .build_indirect_call(
-                self.drop_func_ty(),
-                drop_func.into_pointer_value(),
-                &[val.into()],
-                "",
-            )
-            .unwrap();
-        self.builder.build_return(None).unwrap();
-
-        self.builder.position_at_end(old_insert_block);
-
-        func
-    }
-
-    pub(crate) fn any_closure_copy(&self) -> FunctionValue<'ctx> {
-        let func_name = todo!();
-
-        // Check if we already built this function
-        if let Some(func) = self.module.get_function(func_name) {
-            return func;
-        }
-
-        // Save the builder's current insertion block to restore at the end
-        let old_insert_block = self.builder.get_insert_block().unwrap();
-
-        let func = self.add_func(func_name, self.copy_func_ty(), false);
-        self.builder
-            .position_at_end(self.ctx.append_basic_block(func, "entry"));
-        let dst = func.get_nth_param(0).unwrap();
-        let src = func.get_nth_param(1).unwrap();
-        let copy_func = self
-            .builder
-            .build_struct_gep(self.closure_ty(), src.into_pointer_value(), 3, "")
-            .unwrap();
-        let copy_func = self
-            .builder
-            .build_load(self.ptr_ty(), copy_func, "")
-            .unwrap();
-        self.builder
-            .build_indirect_call(
-                self.copy_func_ty(),
-                copy_func.into_pointer_value(),
-                &[dst.into(), src.into()],
-                "",
-            )
-            .unwrap();
-        self.builder.build_return(None).unwrap();
-
-        self.builder.position_at_end(old_insert_block);
-
-        func
-    }
-
-    pub(crate) fn any_closure_equals(&self) -> FunctionValue<'ctx> {
-        let func_name = todo!();
-
-        // Check if we already built this function
-        if let Some(func) = self.module.get_function(func_name) {
-            return func;
-        }
-
-        // Save the builder's current insertion block to restore at the end
-        let old_insert_block = self.builder.get_insert_block().unwrap();
-
-        let func = self.add_func(func_name, self.equals_func_ty(), false);
-        self.builder
-            .position_at_end(self.ctx.append_basic_block(func, "entry"));
-        let lhs = func.get_nth_param(0).unwrap().into_pointer_value();
-        let rhs = func.get_nth_param(1).unwrap().into_pointer_value();
-
-        // Load the function pointers, which are stored first in the closures.
-        let lhs_func = self
-            .builder
-            .build_load(self.ptr_ty(), lhs, "")
-            .unwrap()
-            .into_pointer_value();
-        let rhs_func = self
-            .builder
-            .build_load(self.ptr_ty(), rhs, "")
-            .unwrap()
-            .into_pointer_value();
-
-        // Test whether the function pointers are equal.
-        let eq = self
-            .builder
-            .build_int_compare(IntPredicate::EQ, lhs_func, rhs_func, "")
-            .unwrap();
-        self.builder.build_return(Some(&eq)).unwrap();
-
-        self.builder.position_at_end(old_insert_block);
-
-        func
-    }
-
-    pub(crate) fn closure_drop(&mut self, name: &str, env_ty: Option<TyId>) -> FunctionValue<'ctx> {
-        let func_name = mangle::assoc_item_symbol(self.pkg, self.ty_ctx, ty, Ident::new("_drop"));
+    pub(crate) fn closure_drop(
+        &mut self,
+        body: DefId,
+        env_ty: Option<TyId>,
+    ) -> FunctionValue<'ctx> {
+        let func_name =
+            mangle::nested_item_symbol(self.pkg, self.ty_ctx, body, Ident::new("_drop"));
 
         // Check if we already built this function
         if let Some(func) = self.module.get_function(&func_name) {
@@ -314,8 +200,13 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         func
     }
 
-    pub(crate) fn closure_copy(&mut self, name: &str, env_ty: Option<TyId>) -> FunctionValue<'ctx> {
-        let func_name = mangle::assoc_item_symbol(self.pkg, self.ty_ctx, ty, Ident::new("_copy"));
+    pub(crate) fn closure_copy(
+        &mut self,
+        body: DefId,
+        env_ty: Option<TyId>,
+    ) -> FunctionValue<'ctx> {
+        let func_name =
+            mangle::nested_item_symbol(self.pkg, self.ty_ctx, body, Ident::new("_copy"));
 
         // Check if we already built this function.
         if let Some(func) = self.module.get_function(&func_name) {
