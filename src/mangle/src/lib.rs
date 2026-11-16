@@ -15,22 +15,14 @@ use irs::{
 const PREFIX: &str = "_P";
 
 /// Produces a mangled symbol for the given function.
-pub fn mangle_func(pkg: &Package, ty_ctx: &TyContext, func: DefId) -> String {
-    let mut buf = String::from(PREFIX);
+pub fn func_symbol(pkg: &Package, ty_ctx: &TyContext, func: DefId) -> String {
     let func = ty_ctx.def(func);
 
     match func.parent {
-        Some(Parent::Impl(ty)) => mangle_assoc_item(pkg, ty_ctx, ty, func.ident, &mut buf),
-        Some(Parent::Def(def)) => {
-            let parent = ty_ctx.def(def);
-            buf.push('N');
-            mangle_module_item(pkg, parent.module, parent.ident, &mut buf);
-            mangle_ident(func.ident, &mut buf);
-        }
-        None => mangle_module_item(pkg, func.module, func.ident, &mut buf),
+        Some(Parent::Impl(ty)) => assoc_item_symbol(pkg, ty_ctx, ty, func.ident),
+        Some(Parent::Def(parent)) => nested_item_symbol(pkg, ty_ctx, parent, func.ident),
+        None => module_item_symbol(pkg, func.module, func.ident),
     }
-
-    buf
 }
 
 /// Produces a mangled symbol for an associated item with the given name
@@ -51,7 +43,22 @@ fn mangle_assoc_path(pkg: &Package, ty_ctx: &TyContext, ty: TyId, buf: &mut Stri
     mangle_ty(pkg, ty_ctx, ty, buf);
 }
 
-/// Produces a mangled symbol for an item with the given name and module
+/// Produces a mangled symbol for a nested function with the given name and parent.
+pub fn nested_item_symbol(
+    pkg: &Package,
+    ty_ctx: &TyContext,
+    parent: DefId,
+    ident: Ident,
+) -> String {
+    let mut buf = String::from(PREFIX);
+    let parent = ty_ctx.def(parent);
+    buf.push('N');
+    mangle_module_item(pkg, parent.module, parent.ident, &mut buf);
+    mangle_ident(ident, &mut buf);
+    buf
+}
+
+/// Produces a mangled symbol for an item with the given name and module.
 pub fn module_item_symbol(pkg: &Package, module: ModuleId, ident: Ident) -> String {
     let mut buf = String::from(PREFIX);
     mangle_module_item(pkg, module, ident, &mut buf);
@@ -78,11 +85,6 @@ fn mangle_module_path(pkg: &Package, module: ModuleId, buf: &mut String) {
         }
     }
 }
-
-/// Produces a mangled symbol for the given type.
-// pub fn mangle_ty(pkg: &Package, ty_ctx: &TyContext, ty: TyId) -> String {
-//     format!("{PREFIX}{}", TyMangler::new(pkg, ty_ctx, ty))
-// }
 
 fn mangle_ty(pkg: &Package, ty_ctx: &TyContext, ty: TyId, buf: &mut String) {
     match ty_ctx.get_ty(ty) {

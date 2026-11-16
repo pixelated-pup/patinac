@@ -38,6 +38,10 @@ impl LowerInfo<'_, '_, '_> {
                 captures,
                 body,
             } => self.lower_lambda(params, captures, *body),
+            // Fast path for single-expression blocks, mainly intended for arithmetic where blocks are used for precedence
+            ExprKind::Block(block) if let [hir::Stmt::Expr(expr)] = block.stmts.as_slice() => {
+                self.lower_as_expr(*expr)
+            }
 
             ExprKind::Var(_)
             | ExprKind::Lit(_)

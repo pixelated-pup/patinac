@@ -39,7 +39,7 @@ use slotmap::SecondaryMap;
 
 use irs::{
     Package,
-    mir::{LocalId, Mir},
+    mir::{Func, LocalId, Mir},
     ty::{DefId, Param, StorageClass, Ty, TyContext, TyId},
 };
 
@@ -115,7 +115,7 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         for def in self.ty_ctx.defs() {
             let def_info = self.ty_ctx.def(def);
 
-            let name = mangle::mangle_func(self.pkg, self.ty_ctx, def);
+            let name = mangle::func_symbol(self.pkg, self.ty_ctx, def);
             let func_ty = self.func_ty(&def_info.params, def_info.ret_ty, false);
 
             let func = self.add_func(&name, func_ty, false);
@@ -202,7 +202,7 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
                 self.vars.insert(local, arg.into_pointer_value());
             } else {
                 // Need to create a new stack allocation for the parameter.
-                let alloc = self.build_local_alloca(local);
+                let alloc = self.build_local_alloca(func, local);
                 self.build_store(param.ty, arg, alloc);
                 self.vars.insert(local, alloc);
             }
@@ -210,9 +210,11 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
 
         // Add allocations for the rest of the local variables.
         for (local, info) in func.locals.iter().skip(offset + func.param_count) {
-            if info.mutable {
+            if self.ty_ctx.is_zst(info.ty) {
                 continue;
             }
+            let alloc = self.build_local_alloca(func, local);
+            self.vars.insert(local, alloc);
         }
 
         self.emit_blocks(def);
@@ -416,6 +418,16 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         self.ctx.ptr_type(AddressSpace::default()).const_null()
     }
 
+    fn dangling(&self, ty: TyId) -> PointerValue<'ctx> {
+        self.builder
+            .build_int_to_ptr(
+                self.const_uint(self.ty_ctx.align_of(ty).into()),
+                self.ptr_ty().into_pointer_type(),
+                "",
+            )
+            .unwrap()
+    }
+
     fn build_alloca(&self, ty: BasicTypeEnum<'ctx>, name: &str) -> PointerValue<'ctx> {
         let curr_block = self.curr_block();
         let head_block = self
@@ -436,8 +448,8 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         alloc
     }
 
-    fn build_local_alloca(&self, local: LocalId) -> PointerValue<'ctx> {
-        let local = self.mir.func(self.def).local(local);
+    fn build_local_alloca(&self, func: &'ext Func, local: LocalId) -> PointerValue<'ctx> {
+        let local = func.local(local);
         // Need to create a new stack allocation for the parameter.
         let name = match local.ident {
             Some(ident) => &ident.str(),
@@ -462,18 +474,16 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         match self.ty_ctx.get_ty(ty) {
             Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => {} // Trivial types.
             Ty::Tuple(elem_tys) => {
-                self.build_call(self.fields_drop(ty, elem_tys), &[place.into()]);
+                let func = self.fields_drop(ty, elem_tys);
+                self.build_call(func, &[place.into()]);
             }
             Ty::Func(_, _) => {
                 self.build_call(self.any_closure_drop(), &[place.into()]);
             }
-            Ty::Named {
-                ident,
-                opaque,
-                fields,
-                ctor,
-                module,
-            } => todo!(),
+            Ty::Named { fields, .. } => {
+                let func = self.fields_drop(ty, fields.values());
+                self.build_call(func, &[place.into()]);
+            }
             Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }
@@ -491,18 +501,16 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
                 self.build_store(ty, value, dst);
             }
             Ty::Tuple(elem_tys) => {
-                self.build_call(self.fields_copy(elem_tys), &[dst.into(), src.into()]);
+                let func = self.fields_copy(ty, elem_tys);
+                self.build_call(func, &[dst.into(), src.into()]);
             }
             Ty::Func(_, _) => {
                 self.build_call(self.any_closure_copy(), &[dst.into(), src.into()]);
             }
-            Ty::Named {
-                ident,
-                opaque,
-                fields,
-                ctor,
-                module,
-            } => todo!(),
+            Ty::Named { fields, .. } => {
+                let func = self.fields_copy(ty, fields.values());
+                self.build_call(func, &[dst.into(), src.into()]);
+            }
             Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }
@@ -555,21 +563,22 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
                     "",
                 )
                 .unwrap(),
-            Ty::Tuple(elem_tys) => self
-                .build_call(self.fields_equals(elem_tys), &[lhs.into(), rhs.into()])
-                .unwrap()
-                .into_int_value(),
+            Ty::Tuple(elem_tys) => {
+                let func = self.fields_equals(ty, elem_tys);
+                self.build_call(func, &[lhs.into(), rhs.into()])
+                    .unwrap()
+                    .into_int_value()
+            }
             Ty::Func(_, _) => self
                 .build_call(self.any_closure_equals(), &[lhs.into(), rhs.into()])
                 .unwrap()
                 .into_int_value(),
-            Ty::Named {
-                ident,
-                opaque,
-                fields,
-                ctor,
-                module,
-            } => todo!(),
+            Ty::Named { fields, .. } => {
+                let func = self.fields_equals(ty, fields.values());
+                self.build_call(func, &[lhs.into(), rhs.into()])
+                    .unwrap()
+                    .into_int_value()
+            }
             Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
         }
     }

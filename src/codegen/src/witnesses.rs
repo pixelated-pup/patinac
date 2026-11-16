@@ -24,25 +24,12 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         self.ctx.bool_type().fn_type(&[ptr, ptr], false)
     }
 
-    pub fn tuple_drop(&mut self, elem_tys: &[TyId]) -> FunctionValue<'ctx> {
-        let name = self.mangle_tuple(fields);
-        self.fields_drop(elem_tys.iter().copied(), lowered_ty, &name)
-    }
-
-    pub fn struct_drop(
-        &mut self,
-        name: &str,
-        fields: impl IntoIterator<Item = TyId>,
-    ) -> FunctionValue<'ctx> {
-        self.fields_drop(fields, lowered_ty, name)
-    }
-
-    pub fn fields_drop(
+    pub fn fields_drop<'fields>(
         &mut self,
         ty: TyId,
-        fields: impl IntoIterator<Item = TyId>,
+        fields: impl IntoIterator<Item = &'fields TyId>,
     ) -> FunctionValue<'ctx> {
-        let name = mangle::mangle_assoc_func(self.pkg, self.ty_ctx, ty, Ident::new("drop"));
+        let name = mangle::assoc_item_symbol(self.pkg, self.ty_ctx, ty, Ident::new("_drop"));
 
         // Check if we already built this function
         if let Some(func) = self.module.get_function(&name) {
@@ -52,14 +39,13 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         // Save the builder's current insertion block to restore at the end
         let old_insert_block = self.builder.get_insert_block().unwrap();
 
-        // Create the function.
         let func = self.add_func(&name, self.drop_func_ty(), false);
         self.builder
             .position_at_end(self.ctx.append_basic_block(func, "entry"));
         let base = func.get_nth_param(0).unwrap().into_pointer_value();
 
         // Drop each field.
-        for (idx, field_ty) in fields.into_iter().enumerate() {
+        for (idx, &field_ty) in fields.into_iter().enumerate() {
             let field_ptr = self.build_field(ty, base, idx);
             self.build_drop(field_ty, field_ptr);
         }
@@ -70,8 +56,12 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         func
     }
 
-    pub fn fields_copy(&mut self, ty: TyId, fields: &[TyId]) -> FunctionValue<'ctx> {
-        let func_name = format!("{}.copy", self.mangle_tuple(fields));
+    pub fn fields_copy<'fields>(
+        &mut self,
+        ty: TyId,
+        fields: impl IntoIterator<Item = &'fields TyId>,
+    ) -> FunctionValue<'ctx> {
+        let func_name = mangle::assoc_item_symbol(self.pkg, self.ty_ctx, ty, Ident::new("_copy"));
 
         // Check if we already built this function
         if let Some(func) = self.module.get_function(&func_name) {
@@ -81,7 +71,6 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         // Save the builder's current insertion block to restore at the end.
         let old_insert_block = self.builder.get_insert_block().unwrap();
 
-        // Create the function.
         let func = self.add_func(&func_name, self.copy_func_ty(), false);
         self.builder
             .position_at_end(self.ctx.append_basic_block(func, "entry"));
@@ -92,11 +81,11 @@ impl<'ctx> CodegenState<'_, 'ctx> {
             self.build_memcpy(ty, dst, src);
         } else {
             // If the fields aren't all trivial, we need to copy each one individually.
-            for (idx, field_ty) in fields.iter().enumerate() {
+            for (idx, &field_ty) in fields.into_iter().enumerate() {
                 let dst = self.build_field(ty, dst, idx);
                 let src = self.build_field(ty, src, idx);
 
-                self.build_copy_to(*field_ty, src, dst);
+                self.build_copy_to(field_ty, src, dst);
             }
         }
         self.builder.build_return(None).unwrap();
@@ -106,8 +95,12 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         func
     }
 
-    pub fn fields_equals(&mut self, ty: TyId, fields: &[TyId]) -> FunctionValue<'ctx> {
-        let func_name = format!("{}.equals", self.mangle_tuple(fields));
+    pub fn fields_equals<'fields>(
+        &mut self,
+        ty: TyId,
+        fields: impl IntoIterator<Item = &'fields TyId>,
+    ) -> FunctionValue<'ctx> {
+        let func_name = mangle::assoc_item_symbol(self.pkg, self.ty_ctx, ty, Ident::new("_eq"));
 
         // Check if we already built this function
         if let Some(func) = self.module.get_function(&func_name) {
@@ -117,7 +110,6 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         // Save the builder's current insertion block to restore at the end.
         let old_insert_block = self.builder.get_insert_block().unwrap();
 
-        // Create the equality function
         let func = self.add_func(&func_name, self.equals_func_ty(), false);
         self.builder
             .position_at_end(self.ctx.append_basic_block(func, "entry"));
@@ -125,7 +117,7 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         let rhs = func.get_nth_param(1).unwrap().into_pointer_value();
         let ne_block = self.ctx.append_basic_block(func, "ne");
 
-        for (idx, field_ty) in fields.iter().enumerate() {
+        for (idx, field_ty) in fields.into_iter().enumerate() {
             let lhs = self.build_field(ty, lhs, idx);
             let rhs = self.build_field(ty, rhs, idx);
 
@@ -162,7 +154,7 @@ impl<'ctx> CodegenState<'_, 'ctx> {
     }
 
     pub(crate) fn any_closure_drop(&self) -> FunctionValue<'ctx> {
-        let func_name = "Closure.drop";
+        let func_name = todo!();
 
         // Check if we already built this function
         if let Some(func) = self.module.get_function(func_name) {
@@ -172,7 +164,6 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         // Save the builder's current insertion block to restore at the end
         let old_insert_block = self.builder.get_insert_block().unwrap();
 
-        // Create the drop function
         let func = self.add_func(func_name, self.drop_func_ty(), false);
         self.builder
             .position_at_end(self.ctx.append_basic_block(func, "entry"));
@@ -201,7 +192,7 @@ impl<'ctx> CodegenState<'_, 'ctx> {
     }
 
     pub(crate) fn any_closure_copy(&self) -> FunctionValue<'ctx> {
-        let func_name = "Closure.copy";
+        let func_name = todo!();
 
         // Check if we already built this function
         if let Some(func) = self.module.get_function(func_name) {
@@ -211,7 +202,6 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         // Save the builder's current insertion block to restore at the end
         let old_insert_block = self.builder.get_insert_block().unwrap();
 
-        // Create the function
         let func = self.add_func(func_name, self.copy_func_ty(), false);
         self.builder
             .position_at_end(self.ctx.append_basic_block(func, "entry"));
@@ -241,7 +231,7 @@ impl<'ctx> CodegenState<'_, 'ctx> {
     }
 
     pub(crate) fn any_closure_equals(&self) -> FunctionValue<'ctx> {
-        let func_name = "Closure.equals";
+        let func_name = todo!();
 
         // Check if we already built this function
         if let Some(func) = self.module.get_function(func_name) {
@@ -251,7 +241,6 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         // Save the builder's current insertion block to restore at the end
         let old_insert_block = self.builder.get_insert_block().unwrap();
 
-        // Create the function
         let func = self.add_func(func_name, self.equals_func_ty(), false);
         self.builder
             .position_at_end(self.ctx.append_basic_block(func, "entry"));
@@ -283,7 +272,7 @@ impl<'ctx> CodegenState<'_, 'ctx> {
     }
 
     pub(crate) fn closure_drop(&mut self, name: &str, env_ty: Option<TyId>) -> FunctionValue<'ctx> {
-        let func_name = format!("{name}.drop");
+        let func_name = mangle::assoc_item_symbol(self.pkg, self.ty_ctx, ty, Ident::new("_drop"));
 
         // Check if we already built this function
         if let Some(func) = self.module.get_function(&func_name) {
@@ -293,7 +282,6 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         // Save the builder's current insertion block to restore at the end
         let old_insert_block = self.builder.get_insert_block().unwrap();
 
-        // Create the drop function
         let func = self.add_func(&func_name, self.drop_func_ty(), false);
         self.builder
             .position_at_end(self.ctx.append_basic_block(func, "entry"));
@@ -327,7 +315,7 @@ impl<'ctx> CodegenState<'_, 'ctx> {
     }
 
     pub(crate) fn closure_copy(&mut self, name: &str, env_ty: Option<TyId>) -> FunctionValue<'ctx> {
-        let func_name = format!("{name}.copy");
+        let func_name = mangle::assoc_item_symbol(self.pkg, self.ty_ctx, ty, Ident::new("_copy"));
 
         // Check if we already built this function.
         if let Some(func) = self.module.get_function(&func_name) {
@@ -337,7 +325,6 @@ impl<'ctx> CodegenState<'_, 'ctx> {
         // Save the builder's current insertion block to restore at the end.
         let old_insert_block = self.builder.get_insert_block().unwrap();
 
-        // Create the copy function.
         let func = self.add_func(&func_name, self.copy_func_ty(), false);
         self.builder
             .position_at_end(self.ctx.append_basic_block(func, "entry"));

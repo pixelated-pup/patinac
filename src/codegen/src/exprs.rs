@@ -189,6 +189,11 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
     }
 
     fn emit_place(&mut self, func: &'ext Func, place: &Place) -> PointerValue<'ctx> {
+        let ty = self.place_ty(func, place);
+        if self.ty_ctx.is_zst(ty) {
+            return self.dangling(ty);
+        }
+
         let mut base = self.vars[place.base];
         let mut ty = func.local(place.base).ty;
 
