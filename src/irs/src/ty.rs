@@ -160,19 +160,19 @@ impl TyContext {
         match self.get_ty(ty) {
             Ty::Int | Ty::UInt | Ty::Float => 8,
             Ty::Byte | Ty::Bool => 1,
-            Ty::Tuple(elem_tys) => todo!(),
-            // Ty::Fields(field_tys) => {
-            //     let align = self.align_of(ty);
+            Ty::Tuple(elem_tys) => {
+                todo!()
+                // let align = self.align_of(ty);
 
-            //     let base_size = field_tys.iter().fold(0, |sum, &ty| {
-            //         let align = self.align_of(ty);
-            //         let padding = (align - (sum % align)) % align;
-            //         sum + padding + self.size_of(ty)
-            //     });
+                // let base_size = field_tys.iter().fold(0, |sum, &ty| {
+                //     let align = self.align_of(ty);
+                //     let padding = (align - (sum % align)) % align;
+                //     sum + padding + self.size_of(ty)
+                // });
 
-            //     let end_padding = (align - (base_size % align)) % align;
-            //     base_size + end_padding
-            // }
+                // let end_padding = (align - (base_size % align)) % align;
+                // base_size + end_padding
+            }
             Ty::Func(_, _) => PTR_SIZE * 4, // Function, environment, drop, copy.
             Ty::Named {
                 ident,

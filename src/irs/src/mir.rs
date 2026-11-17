@@ -42,7 +42,8 @@ pub struct Func {
     pub param_count: usize,
     /// The local variables of the function.
     ///
-    /// The first `arg_count` are the function's arguments,
+    /// The first local is the return place,
+    /// the next `param_count` are the function's arguments,
     /// and the remainder are user-defined variables and temporaries
     pub locals: SlotMap<LocalId, Local>,
     /// The basic blocks comprising the function's body.
@@ -52,10 +53,16 @@ pub struct Func {
 impl Func {
     /// Creates a new empty function with the given parameter count.
     /// The locals representing the parameters must still be set up.
-    pub fn new(param_count: usize) -> Self {
+    pub fn new(param_count: usize, ret_ty: TyId) -> Self {
+        let mut locals = SlotMap::default();
+        locals.insert(Local {
+            ident: None,
+            mutable: false,
+            ty: ret_ty,
+        });
         Self {
             param_count,
-            locals: SlotMap::default(),
+            locals,
             blocks: SlotMap::default(),
         }
     }
@@ -63,6 +70,11 @@ impl Func {
     /// Adds a local variable with the provided information, returning a unique ID for it.
     pub fn add_local(&mut self, var: Local) -> LocalId {
         self.locals.insert(var)
+    }
+
+    /// Returns the ID of the local used for the return value.
+    pub fn ret_place(&self) -> LocalId {
+        self.locals.keys().next().unwrap()
     }
 
     /// Returns the information for the given variable.
@@ -162,8 +174,8 @@ pub enum Terminator {
         /// The fallback block.
         otherwise: BlockId,
     },
-    /// Returning from the current function.
-    Return(Value),
+    /// Return from the current function. The return value is placed in the first local of the function.
+    Return,
     /// Indicates an unreachable branch. UB if this is ever executed.
     Unreachable,
 }
@@ -178,24 +190,13 @@ pub enum Stmt {
         /// The expression being assigned.
         expr: Expr,
     },
-    /// An expression used as a statement, evaluated purely for side-effects.
-    // Expr(ExprId),
-    /// A function call.
-    Call {
-        /// The function or closure being called.
-        callee: Callee,
-        /// The list of arguments being applied.
-        args: Vec<Arg>,
-        /// Where the result of the function call will be stored.
-        dst: Place,
-    },
     /// Drop the contents of a place.
     Drop(Place),
     /// TEMPORARY, until we have stdlib + FFI.
     Print(Value),
 }
 
-/// The callee of a [function call][Stmt::Call].
+/// The callee of a [function call][Expr::Call].
 #[derive(Debug)]
 pub enum Callee {
     /// A direct call to a compile-time known function.
@@ -218,10 +219,19 @@ pub enum Arg {
 pub enum Expr {
     /// A value used unchanged as an expression.
     Val(Value),
+    /// A copy from a place. The resulting value is independent of the source place.
+    Copy(Place),
     /// An infix operation.
     Infix(InfixOp, Value, Value),
     /// A prefix operation.
     Prefix(PrefixOp, Value),
+    /// A function call.
+    Call {
+        /// The function or closure being called.
+        callee: Callee,
+        /// The list of arguments being applied.
+        args: Vec<Arg>,
+    },
     /// A closure.
     Closure {
         /// The lifted function representing the closure body.
@@ -233,17 +243,16 @@ pub enum Expr {
 
 /// A simple value that needs minimal further evaluation.
 ///
+/// Whatever evaluation this value does need should produce no side effects.
+///
 /// Values act as operands to [`Exprs`][Expr],
-/// and are either some form of read from a [`place`][`Place`],
-/// a [`literal`][`LitValue`],
-/// or a constant ZST value.
+/// and are either some a read from a [`place`][`Place`],
+/// a [`literal`][`LitValue`], or a constant ZST value.
 #[derive(Clone, Debug)]
 pub enum Value {
-    /// A copy from a place. The resulting value is independent of the source place.
-    Copy(Place),
-    /// A move out of a place. This does not run any copy code (such as incrementing a refcount).
+    /// A possibly-aliasing read of a place. This does not run any copy code (such as incrementing a refcount).
     /// The resulting value may be tied to the source place, and so neither may be mutated while both are live.
-    Share(Place),
+    Read(Place),
     /// A scalar literal value. The specific kinds of literals are represented by [`LitValue`].
     Lit(LitValue),
     /// A ZST value of the given type.
@@ -313,8 +322,6 @@ pub enum InfixOp {
     /// Integer division by zero is undefined behaviour,
     /// and checks should have been inserted into the MIR around this operator.
     Div,
-    /// Exponentiation.
-    Exp,
     /// Equality, on any type.
     Eqq,
     /// Inequality, on any type.

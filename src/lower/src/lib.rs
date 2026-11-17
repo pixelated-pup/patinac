@@ -30,7 +30,7 @@ struct LowerInfo<'ext, 'mir, 'func> {
 pub fn lower(hir: &Hir, ty_ctx: &mut TyContext, handler: ErrorHandler<'_>) -> Mir {
     let mut mir = Mir::default();
 
-    // TODO: Lower ctors
+    todo!("Lower ctors");
 
     for def in hir.defs() {
         let func = lower_item(hir, ty_ctx, &handler, &mut mir, def);
@@ -62,7 +62,7 @@ fn lower_func(
     params: &[VarId],
     body: ExprId,
 ) -> Func {
-    let mut func = Func::new(params.len());
+    let mut func = Func::new(params.len(), hir.expr(body).ty);
     let mut builder = LowerInfo::new(hir, ty_ctx, handler, mir, def, &mut func);
 
     // Set up function parameters.
@@ -77,8 +77,8 @@ fn lower_func(
     }
 
     // Lower the function body and build the function return.
-    let ret_value = builder.lower_as_value(body, false);
-    builder.set_term(mir::Terminator::Return(ret_value));
+    builder.lower_into_place(Place::local(builder.func.ret_place()), body);
+    builder.set_term(mir::Terminator::Return);
 
     func
 }
@@ -91,7 +91,7 @@ fn lower_const(
     def: DefId,
     expr: ExprId,
 ) -> Func {
-    let mut func = Func::new(0);
+    let mut func = Func::new(0, hir.expr(expr).ty);
     let mut builder = LowerInfo::new(hir, ty_ctx, handler, mir, def, &mut func);
 
     // Lower the function body and build the function return.
@@ -107,10 +107,10 @@ fn lower_ctor(ty_ctx: &TyContext, ty: TyId) -> Func {
         unreachable!("ICE: Attempted to lower constructor for non-named type")
     };
 
-    let mut func = Func::new(fields.len());
+    let mut func = Func::new(fields.len(), ty);
     let entry = func.add_block();
 
-    let temp = func.add_temp(ty);
+    let dst = func.ret_place();
     for (idx, (ident, field_ty)) in fields.iter().enumerate() {
         // Add the local corresponding to the parameter for this field.
         let local = func.add_local(Local {
@@ -120,7 +120,7 @@ fn lower_ctor(ty_ctx: &TyContext, ty: TyId) -> Func {
         });
         // Construct the field place.
         let field = Place {
-            base: temp,
+            base: dst,
             accesses: vec![FieldAccess { idx, ty: *field_ty }],
         };
         // Assign the parameter to the field place.
@@ -128,12 +128,12 @@ fn lower_ctor(ty_ctx: &TyContext, ty: TyId) -> Func {
             entry,
             mir::Stmt::Assign {
                 place: field,
-                expr: mir::Expr::Val(Value::Copy(Place::local(local))),
+                expr: mir::Expr::Copy(Place::local(local)),
             },
         );
     }
 
-    func.block_mut(entry).term = Some(Terminator::Return(Value::Share(Place::local(temp))));
+    func.block_mut(entry).term = Some(Terminator::Return);
 
     func
 }

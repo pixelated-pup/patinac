@@ -28,7 +28,7 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
 
     fn value_ty(&self, func: &'ext Func, value: &Value) -> TyId {
         match value {
-            Value::Copy(place) | Value::Share(place) => self.place_ty(func, place),
+            Value::Read(place) => self.place_ty(func, place),
             Value::Lit(lit_value) => match lit_value {
                 LitValue::Int(_) => self.ty_ctx.int(),
                 LitValue::UInt(_) => self.ty_ctx.uint(),
@@ -97,23 +97,15 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
                     .build_switch(scrutinee, blocks[*otherwise], &targets)
                     .unwrap();
             }
-            Terminator::Return(value) => {
+            Terminator::Return => {
                 let ret_ty = self.ty_ctx.def(def).ret_ty;
-                let value = self.emit_value(func, value);
                 match self.ty_ctx.storage_class(ret_ty) {
-                    StorageClass::Zst => {
-                        self.builder.build_return(None).unwrap();
-                    }
-                    StorageClass::Indirect => {
-                        let dst = self
-                            .curr_function()
-                            .get_first_param()
-                            .unwrap()
-                            .into_pointer_value();
-                        self.build_store(ret_ty, value, dst);
+                    StorageClass::Zst | StorageClass::Indirect => {
                         self.builder.build_return(None).unwrap();
                     }
                     StorageClass::Scalar => {
+                        let ret_place = Place::local(func.ret_place());
+                        let value = self.emit_value(func, &Value::Read(ret_place));
                         self.builder.build_return(Some(&value)).unwrap();
                     }
                 }
@@ -129,10 +121,8 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
             Stmt::Assign { place, expr } => {
                 let ty = self.place_ty(func, place);
                 let place = self.emit_place(func, place);
-                let expr = self.emit_expr(func, expr);
-                self.build_store(ty, expr, place);
+                self.emit_expr(func, ty, place, expr);
             }
-            Stmt::Call { callee, args, dst } => self.emit_call(func, callee, args, dst),
             Stmt::Drop(place) => {
                 let ty = self.place_ty(func, place);
                 let place = self.emit_place(func, place);
@@ -142,29 +132,42 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         }
     }
 
-    fn emit_expr(&mut self, func: &'ext Func, expr: &Expr) -> BasicValueEnum<'ctx> {
+    fn emit_expr(&mut self, func: &'ext Func, ty: TyId, dst: PointerValue<'ctx>, expr: &Expr) {
         match expr {
-            Expr::Val(value) => self.emit_value(func, value),
-            Expr::Infix(op, lhs, rhs) => self.emit_infix(func, *op, lhs, rhs),
-            Expr::Prefix(op, arg) => self.emit_prefix(func, *op, arg),
-            Expr::Closure { body, env } => self.emit_closure(func, *body, env),
+            Expr::Val(value) => {
+                let value = self.emit_value(func, value);
+                self.build_store(ty, dst, value);
+            }
+            Expr::Copy(place) => {
+                let place = self.emit_place(func, place);
+                self.build_copy(ty, place, dst);
+            }
+            Expr::Infix(op, lhs, rhs) => {
+                let value = self.emit_infix(func, *op, lhs, rhs);
+                self.build_store(ty, dst, value);
+            }
+            Expr::Prefix(op, arg) => {
+                let value = self.emit_prefix(func, *op, arg);
+                self.build_store(ty, dst, value);
+            }
+            Expr::Call { callee, args } => self.emit_call(func, dst, callee, args, ty),
+            Expr::Closure { body, env } => self.emit_closure(func, dst, *body, env),
         }
     }
 
     fn emit_value(&mut self, func: &'ext Func, value: &Value) -> BasicValueEnum<'ctx> {
         match value {
-            Value::Copy(place) => {
+            Value::Read(place) => {
                 let ty = self.place_ty(func, place);
                 let place = self.emit_place(func, place);
-                self.build_copy(ty, place)
-            }
-            Value::Share(place) => {
-                let ty = self.place_ty(func, place);
-                let place = self.emit_place(func, place);
-                self.build_share(ty, place)
+                self.build_read(ty, place)
             }
             Value::Lit(lit) => self.emit_lit(lit),
-            Value::Zst(_) => todo!(),
+            Value::Zst(_) => self
+                .ctx
+                .struct_type(&[], false)
+                .get_poison()
+                .as_basic_value_enum(),
         }
     }
 
@@ -176,11 +179,11 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
             Ty::Byte => "%hhu\n",
             Ty::Float => "%f\n",
             Ty::Bool => "%hhd\n",
-            _ => todo!(),
+            _ => todo!("Proper printing"),
         };
         let format = self
             .builder
-            .build_global_string_ptr(format, "format_string")
+            .build_global_string_ptr(format, "")
             .unwrap()
             .as_pointer_value();
 
@@ -280,7 +283,6 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
                     }
                 },
             ),
-            InfixOp::Exp => todo!(),
             op @ (InfixOp::Eqq | InfixOp::Neq) => {
                 let equals = self.build_equals(ty, lhs, rhs);
                 if op == InfixOp::Neq {
@@ -363,15 +365,31 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         }
     }
 
-    fn emit_call(&mut self, func: &'ext Func, callee: &Callee, args: &[Arg], dst: &Place) {
-        let ret_ty = self.place_ty(func, dst);
-        let dst = self.emit_place(func, dst);
-
-        let mut args: Vec<_> = args
+    fn emit_call(
+        &mut self,
+        func: &'ext Func,
+        dst: PointerValue<'ctx>,
+        callee: &Callee,
+        args: &[Arg],
+        ret_ty: TyId,
+    ) {
+        let mut args: Vec<BasicMetadataValueEnum<'_>> = args
             .iter()
-            .map(|arg| match arg {
-                Arg::Immut(value) => self.emit_value(func, value).into(),
-                Arg::Mut(place) => self.emit_place(func, place).into(),
+            .filter_map(|arg| match arg {
+                Arg::Immut(value) => {
+                    if self.ty_ctx.is_zst(self.value_ty(func, value)) {
+                        None
+                    } else {
+                        Some(self.emit_value(func, value).into())
+                    }
+                }
+                Arg::Mut(place) => {
+                    if self.ty_ctx.is_zst(self.place_ty(func, place)) {
+                        None
+                    } else {
+                        Some(self.emit_place(func, place).into())
+                    }
+                }
             })
             .collect();
 
@@ -385,7 +403,7 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
             }
             StorageClass::Scalar => {
                 let result = self.emit_call_inner(func, callee, args).unwrap();
-                self.build_store(ret_ty, result, dst);
+                self.build_store(ret_ty, dst, result);
             }
         }
     }
@@ -423,17 +441,20 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         }
     }
 
-    fn emit_closure(&mut self, func: &'ext Func, body: DefId, env: &Value) -> BasicValueEnum<'ctx> {
-        // Create the environment, if one is needed
-        let (env_ptr, env_ty) = if let Value::Zst(_) = env {
-            (self.const_null(), None)
-        } else {
-            let env_ty = self.value_ty(func, env);
-            let env_ptr = self.build_malloc(env_ty);
+    fn emit_closure(
+        &mut self,
+        func: &'ext Func,
+        dst: PointerValue<'ctx>,
+        body: DefId,
+        env: &Value,
+    ) {
+        // Allocate the environment.
+        let env_ty = self.value_ty(func, env);
+        let env_ptr = self.build_malloc(env_ty);
+        if !self.ty_ctx.is_zst(env_ty) {
             let env = self.emit_value(func, env);
-            self.build_store(env_ty, env, env_ptr);
-            (env_ptr, Some(env_ty))
-        };
+            self.build_store(env_ty, env_ptr, env);
+        }
 
         // Create the witness functions.
         let drop = self
@@ -445,22 +466,15 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
             .as_global_value()
             .as_pointer_value();
 
-        // Store everything into the closure.
+        // Build the closure in the destination
         let ty = self.closure_ty();
-        let closure = self.build_alloca(ty, "");
-        let store = |this: &Self, idx, val| {
-            let ptr = this.builder.build_struct_gep(ty, closure, idx, "").unwrap();
-            this.builder.build_store(ptr, val).unwrap();
+        let store = |idx, val| {
+            let ptr = self.builder.build_struct_gep(ty, dst, idx, "").unwrap();
+            self.builder.build_store(ptr, val).unwrap();
         };
-        store(
-            self,
-            0,
-            self.funcs[body].as_global_value().as_pointer_value(),
-        );
-        store(self, 1, env_ptr);
-        store(self, 2, drop);
-        store(self, 3, copy);
-
-        closure.as_basic_value_enum()
+        store(0, self.funcs[body].as_global_value().as_pointer_value());
+        store(1, env_ptr);
+        store(2, drop);
+        store(3, copy);
     }
 }

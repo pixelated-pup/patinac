@@ -10,7 +10,7 @@ irs.path = "../irs"
 mangle.path = "../mangle"
 # External
 foldhash = "0.2.0"
-inkwell = { version = "0.9.0", features = ["llvm22-1"] }
+inkwell = { version = "0.11.0", features = ["llvm22-1"] }
 slotmap = "1.1.1"
 
 [lints]

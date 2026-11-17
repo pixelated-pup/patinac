@@ -11,8 +11,7 @@
 mod attrs;
 mod config;
 mod exprs;
-mod runtime;
-mod witnesses;
+mod funcs;
 
 use std::iter;
 
@@ -121,6 +120,7 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
             self.funcs.insert(def, func);
         }
 
+        todo!("Emit main properly");
         // if let Some(main) = self.mir.main() {
         //     let ty = self.ctx.i32_type().fn_type(&[], false);
         //     let func = self.add_func("main", ty, true);
@@ -176,44 +176,41 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         let setup_block = self.ctx.append_basic_block(llvm_func, "");
         self.builder.position_at_end(setup_block);
 
-        // Skip the first argument if it would be an out-pointer.
-        let offset = if self.ty_ctx.is_indirect(self.ty_ctx.def(def).ret_ty) {
-            1
+        // Set up allocations for the locals.
+        let mut args = llvm_func.get_param_iter();
+
+        // First local is the return place.
+        let ret_place = func.ret_place();
+        if self.ty_ctx.is_indirect(self.ty_ctx.def(def).ret_ty) {
+            self.vars
+                .insert(ret_place, args.next().unwrap().into_pointer_value());
         } else {
-            0
-        };
-
-        // Set up parameters.
-        let args = llvm_func.get_param_iter();
-        let params = func
-            .locals
-            .iter()
-            .filter(|(_, param)| param.mutable || !self.ty_ctx.is_zst(param.ty));
-        let iter = iter::zip(params, args).skip(offset);
-        for ((local, param), arg) in iter {
-            if !param.mutable && self.ty_ctx.is_zst(param.ty) {
-                // We don't actually pass ZSTs.
-                continue;
-            }
-
-            if param.mutable || self.ty_ctx.is_indirect(param.ty) {
-                // Already will be a pointer.
-                self.vars.insert(local, arg.into_pointer_value());
-            } else {
-                // Need to create a new stack allocation for the parameter.
-                let alloc = self.build_local_alloca(func, local);
-                self.build_store(param.ty, arg, alloc);
-                self.vars.insert(local, alloc);
-            }
+            let alloc = self.build_local_alloca(func, ret_place);
+            self.vars.insert(ret_place, alloc);
         }
 
-        // Add allocations for the rest of the local variables.
-        for (local, info) in func.locals.iter().skip(offset + func.param_count) {
+        // The rest of the locals are either parameters, temporaries, or variables.
+        for (local, info) in func.locals.iter().skip(1) {
+            // We don't actually pass or allocate ZSTs.
             if self.ty_ctx.is_zst(info.ty) {
                 continue;
             }
-            let alloc = self.build_local_alloca(func, local);
-            self.vars.insert(local, alloc);
+
+            let ptr = match args.next() {
+                Some(arg) if info.mutable || self.ty_ctx.is_indirect(info.ty) => {
+                    // Mutable or indirect-type parameters are already pointers.
+                    arg.into_pointer_value()
+                }
+                Some(arg) => {
+                    // Immutable, direct-type parameters need local allocations created.
+                    let alloc = self.build_local_alloca(func, local);
+                    self.build_store(info.ty, alloc, arg);
+                    alloc
+                }
+                None => self.build_local_alloca(func, local),
+            };
+
+            self.vars.insert(local, ptr);
         }
 
         self.emit_blocks(def);
@@ -230,6 +227,7 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         };
         let func = self.module.add_function(name, ty, Some(linkage));
         func.set_call_conventions(call_conv as u32);
+        func.as_global_value().set_unnamed_addr(true);
         func
     }
 
@@ -331,10 +329,10 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         let mut param_tys: Vec<_> = params
             .iter()
             .filter_map(|p| {
-                if p.mutable || self.ty_ctx.is_indirect(p.ty) {
-                    Some(self.ptr_ty().into()) // Pass stack pointers for mutable parameters or indirect types.
-                } else if self.ty_ctx.is_zst(p.ty) {
+                if self.ty_ctx.is_zst(p.ty) {
                     None // Skip passing ZSTs.
+                } else if p.mutable || self.ty_ctx.is_indirect(p.ty) {
+                    Some(self.ptr_ty().into()) // Pass by pointer for mutable parameters or indirect types.
                 } else {
                     Some(self.lower_ty(p.ty).into()) // Pass by value otherwise.
                 }
@@ -357,6 +355,9 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         }
     }
 
+    /// Gets the cached field order for the given type, which must be [`Ty::Tuple`] or [`Ty::Named`].
+    ///
+    /// The returned slice has one element for each field of the type, corresponding to the in-memory index of that field.
     fn get_field_order(&mut self, ty: TyId) -> &[u32] {
         self.field_orders
             .entry(ty)
@@ -379,7 +380,7 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
                 // order.sort_by_key(|idx| ty_ctx.size_of(fields[usize::try_from(*idx).unwrap()]));
                 // order
             }
-            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variable in codegen"),
             _ => panic!("ICE: Attempted to calculate field order for type without fields"),
         }
     }
@@ -427,12 +428,16 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
             .unwrap()
     }
 
-    fn build_alloca(&self, ty: BasicTypeEnum<'ctx>, name: &str) -> PointerValue<'ctx> {
+    fn build_local_alloca(&self, func: &'ext Func, local: LocalId) -> PointerValue<'ctx> {
+        let local = func.local(local);
+
+        let name = match local.ident {
+            Some(ident) => &ident.str(),
+            None => "",
+        };
+
         let curr_block = self.curr_block();
-        let head_block = self
-            .curr_function()
-            .get_first_basic_block()
-            .expect("function has at least one block; we got this function via a block");
+        let head_block = self.curr_function().get_first_basic_block().unwrap();
 
         if let Some(first_instr) = head_block.get_first_instruction() {
             self.builder.position_before(&first_instr);
@@ -440,21 +445,19 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
             self.builder.position_at_end(head_block);
         }
 
-        let alloc = self.builder.build_alloca(ty, name).unwrap();
+        let alloc = self
+            .builder
+            .build_alloca(self.lower_ty(local.ty), name)
+            .unwrap();
+        alloc
+            .as_instruction_value()
+            .unwrap()
+            .set_alignment(self.ty_ctx.align_of(local.ty))
+            .unwrap();
 
         self.builder.position_at_end(curr_block);
 
         alloc
-    }
-
-    fn build_local_alloca(&self, func: &'ext Func, local: LocalId) -> PointerValue<'ctx> {
-        let local = func.local(local);
-        // Need to create a new stack allocation for the parameter.
-        let name = match local.ident {
-            Some(ident) => &ident.str(),
-            None => "",
-        };
-        self.build_alloca(self.lower_ty(local.ty), name)
     }
 
     fn build_field(
@@ -467,6 +470,65 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         self.builder
             .build_struct_gep(self.lower_ty(ty), base, idx, "")
             .unwrap()
+    }
+
+    fn build_read(&self, ty: TyId, place: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
+        match self.ty_ctx.get_ty(ty) {
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Bool | Ty::Float => self
+                .builder
+                .build_load(self.lower_ty(ty), place, "")
+                .unwrap(),
+            Ty::Tuple(_) | Ty::Func(_, _) | Ty::Named { .. } => place.as_basic_value_enum(),
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variable in codegen"),
+        }
+    }
+
+    fn build_store(&self, ty: TyId, dst: PointerValue<'ctx>, value: BasicValueEnum<'ctx>) {
+        match self.ty_ctx.get_ty(ty) {
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => {
+                self.builder.build_store(dst, value).unwrap();
+            }
+            Ty::Tuple(_) | Ty::Func(_, _) | Ty::Named { .. } => {
+                self.build_memcpy(ty, dst, value.into_pointer_value())
+            }
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variable in codegen"),
+        }
+    }
+
+    fn build_copy(&mut self, ty: TyId, src: PointerValue<'ctx>, dst: PointerValue<'ctx>) {
+        match self.ty_ctx.get_ty(ty) {
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Bool | Ty::Float => {
+                let value = self.build_read(ty, src);
+                self.build_store(ty, dst, value);
+            }
+            Ty::Tuple(elem_tys) => {
+                let func = self.fields_copy(ty, elem_tys);
+                self.build_call(func, &[dst.into(), src.into()]);
+            }
+            Ty::Func(_, _) => {
+                let copy_func = self
+                    .builder
+                    .build_struct_gep(self.closure_ty(), src, 3, "")
+                    .unwrap();
+                let copy_func = self
+                    .builder
+                    .build_load(self.ptr_ty(), copy_func, "")
+                    .unwrap();
+                self.builder
+                    .build_indirect_call(
+                        self.copy_func_ty(),
+                        copy_func.into_pointer_value(),
+                        &[dst.into(), src.into()],
+                        "",
+                    )
+                    .unwrap();
+            }
+            Ty::Named { fields, .. } => {
+                let func = self.fields_copy(ty, fields.values());
+                self.build_call(func, &[dst.into(), src.into()]);
+            }
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variable in codegen"),
+        }
     }
 
     fn build_drop(&mut self, ty: TyId, place: PointerValue<'ctx>) {
@@ -498,72 +560,7 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
                 let func = self.fields_drop(ty, fields.values());
                 self.build_call(func, &[place.into()]);
             }
-            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
-        }
-    }
-
-    fn build_copy(&mut self, ty: TyId, place: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
-        let temp = self.build_alloca(self.lower_ty(ty), "");
-        self.build_copy_to(ty, place, temp);
-        temp.as_basic_value_enum()
-    }
-
-    fn build_copy_to(&mut self, ty: TyId, src: PointerValue<'ctx>, dst: PointerValue<'ctx>) {
-        match self.ty_ctx.get_ty(ty) {
-            Ty::Int | Ty::UInt | Ty::Byte | Ty::Bool | Ty::Float => {
-                let value = self.builder.build_load(self.lower_ty(ty), src, "").unwrap();
-                self.build_store(ty, value, dst);
-            }
-            Ty::Tuple(elem_tys) => {
-                let func = self.fields_copy(ty, elem_tys);
-                self.build_call(func, &[dst.into(), src.into()]);
-            }
-            Ty::Func(_, _) => {
-                let copy_func = self
-                    .builder
-                    .build_struct_gep(self.closure_ty(), src, 3, "")
-                    .unwrap();
-                let copy_func = self
-                    .builder
-                    .build_load(self.ptr_ty(), copy_func, "")
-                    .unwrap();
-                self.builder
-                    .build_indirect_call(
-                        self.copy_func_ty(),
-                        copy_func.into_pointer_value(),
-                        &[dst.into(), src.into()],
-                        "",
-                    )
-                    .unwrap();
-            }
-            Ty::Named { fields, .. } => {
-                let func = self.fields_copy(ty, fields.values());
-                self.build_call(func, &[dst.into(), src.into()]);
-            }
-            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
-        }
-    }
-
-    fn build_share(&self, ty: TyId, place: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
-        match self.ty_ctx.get_ty(ty) {
-            Ty::Int | Ty::UInt | Ty::Byte | Ty::Bool | Ty::Float => self
-                .builder
-                .build_load(self.lower_ty(ty), place, "")
-                .unwrap(),
-            Ty::Tuple(_) | Ty::Func(_, _) | Ty::Named { .. } => place.as_basic_value_enum(),
-            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
-        }
-    }
-
-    fn build_store(&self, ty: TyId, value: BasicValueEnum<'ctx>, dst: PointerValue<'ctx>) {
-        match self.ty_ctx.get_ty(ty) {
-            Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => {
-                self.builder.build_store(dst, value).unwrap();
-            }
-            Ty::Tuple(_) | Ty::Func(_, _) | Ty::Named { .. } => {
-                self.build_memcpy(ty, dst, value.into_pointer_value())
-            }
-            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variable in codegen"),
         }
     }
 
@@ -622,27 +619,33 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
                     .unwrap()
                     .into_int_value()
             }
-            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variables in codegen"),
+            Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variable in codegen"),
         }
     }
 
-    fn build_panic(&self, msg: &str) {
+    fn build_panic(&mut self, msg: &str) {
         let msg = self
             .builder
             .build_global_string_ptr(msg, "")
             .unwrap()
             .as_pointer_value();
-        self.build_call(self.panic(), &[msg.into()]);
+        let panic = self.panic();
+        self.build_call(panic, &[msg.into()]);
         self.builder.build_unreachable().unwrap();
     }
 
-    fn build_malloc(&self, ty: TyId) -> PointerValue<'ctx> {
-        self.build_call(
-            self.malloc(),
-            &[self.const_uint(self.ty_ctx.size_of(ty).into()).into()],
-        )
-        .unwrap()
-        .into_pointer_value()
+    fn build_malloc(&mut self, ty: TyId) -> PointerValue<'ctx> {
+        if self.ty_ctx.is_zst(ty) {
+            self.dangling(ty)
+        } else {
+            let malloc = self.malloc();
+            self.build_call(
+                malloc,
+                &[self.const_uint(self.ty_ctx.size_of(ty).into()).into()],
+            )
+            .unwrap()
+            .into_pointer_value()
+        }
     }
 
     fn build_memcpy(&self, ty: TyId, dst: PointerValue<'ctx>, src: PointerValue<'ctx>) {
@@ -659,16 +662,12 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
     /// # Panics
     /// Panics if the builder is not positioned.
     fn curr_block(&self) -> BasicBlock<'ctx> {
-        self.builder
-            .get_insert_block()
-            .expect("builder has been positioned")
+        self.builder.get_insert_block().unwrap()
     }
 
     /// # Panics
     /// Panics if the builder is not positioned, or is positioned but not within a function.
     fn curr_function(&self) -> FunctionValue<'ctx> {
-        self.curr_block()
-            .get_parent()
-            .expect("builder is within function")
+        self.curr_block().get_parent().unwrap()
     }
 }

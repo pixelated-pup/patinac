@@ -57,7 +57,7 @@ impl OptLevel {
 }
 
 /// Supported compilation targets.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[expect(clippy::doc_markdown, reason = "false positive")]
 pub enum Target {
     /// Windows on x86_64 using the MSVC toolchain (`x86_64-pc-windows-msvc`).
