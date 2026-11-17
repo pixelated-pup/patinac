@@ -12,7 +12,7 @@ use irs::{
         Arg, BlockId, Callee, Expr, Func, InfixOp, LitValue, Place, PrefixOp, Stmt, Terminator,
         Value,
     },
-    ty::{DefId, StorageClass, Ty, TyId},
+    ty::{DefId, Ty, TyId, layout::StorageClass},
 };
 use slotmap::SecondaryMap;
 
@@ -54,7 +54,7 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         }
     }
 
-    fn emit_block_stmts(&mut self, func: &'ext Func, mir_block: BlockId) -> BasicBlock<'ctx> {
+    pub fn emit_block_stmts(&mut self, func: &'ext Func, mir_block: BlockId) -> BasicBlock<'ctx> {
         let llvm_block = self.ctx.append_basic_block(self.curr_function(), "");
         self.builder.position_at_end(llvm_block);
 
@@ -65,7 +65,7 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         llvm_block
     }
 
-    fn emit_block_term(
+    pub fn emit_block_term(
         &mut self,
         blocks: &SecondaryMap<BlockId, BasicBlock<'ctx>>,
         def: DefId,
@@ -432,11 +432,8 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
                 // Extract function pointer from closure and call it.
                 let func = self.builder.build_struct_gep(ty, closure, 0, "").unwrap();
                 let func = self.builder.build_load(self.ptr_ty(), func, "").unwrap();
-                self.build_indirect_call(
-                    self.func_ty(params, *ret_ty, true),
-                    func.into_pointer_value(),
-                    &args,
-                )
+                let func_ty = self.func_ty(params, *ret_ty, true);
+                self.build_indirect_call(func_ty, func.into_pointer_value(), &args)
             }
         }
     }

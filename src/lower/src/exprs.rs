@@ -1,4 +1,4 @@
-use std::range::Range;
+use std::{iter, range::Range};
 
 use errors::Report;
 use ident::Ident;
@@ -377,6 +377,10 @@ impl LowerInfo<'_, '_, '_> {
                         mutable: var.mutable,
                     }
                 })
+                .chain(iter::once(Param {
+                    ty: env_ty,
+                    mutable: false,
+                }))
                 .collect(),
             ret_ty: self.hir.expr(body).ty,
         });

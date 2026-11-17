@@ -13,8 +13,6 @@ mod config;
 mod exprs;
 mod funcs;
 
-use std::iter;
-
 use foldhash::{HashMap, HashMapExt as _};
 use inkwell::{
     AddressSpace, FloatPredicate, IntPredicate,
@@ -38,7 +36,7 @@ use slotmap::SecondaryMap;
 use irs::{
     Package,
     mir::{Func, LocalId, Mir},
-    ty::{DefId, Param, StorageClass, Ty, TyContext, TyId},
+    ty::{DefId, Param, Ty, TyContext, TyId, layout::StorageClass},
 };
 
 pub use config::*;
@@ -120,25 +118,20 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
             self.funcs.insert(def, func);
         }
 
-        todo!("Emit main properly");
-        // if let Some(main) = self.mir.main() {
-        //     let ty = self.ctx.i32_type().fn_type(&[], false);
-        //     let func = self.add_func("main", ty, true);
-        //     self.funcs.insert(main.var, func);
+        if let Some(main) = self.ty_ctx.main() {
+            let i32_ty = self.ctx.i32_type();
+            let ty = i32_ty.fn_type(&[i32_ty.into(), self.ptr_ty().into()], false);
+            let func = self.add_func("main", ty, true);
 
-        //     let ItemKind::Func { body, .. } = main.kind else {
-        //         unreachable!("ICE")
-        //     };
+            self.builder
+                .position_at_end(self.ctx.append_basic_block(func, ""));
+            self.build_call(self.funcs[main], &[]);
+            self.builder
+                .build_return(Some(&i32_ty.const_zero()))
+                .unwrap();
 
-        //     let entry_block = self.ctx.append_basic_block(func, "entry");
-        //     self.builder.position_at_end(entry_block);
-        //     let _ = self.emit_expr(body);
-        //     self.builder
-        //         .build_return(Some(&self.ctx.i32_type().const_zero()))
-        //         .unwrap();
-
-        //     assert!(func.verify(true));
-        // }
+            assert!(func.verify(true));
+        }
 
         for def in self.ty_ctx.defs() {
             self.emit_func_body(def);
@@ -268,14 +261,17 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         call.try_as_basic_value().basic()
     }
 
-    fn lower_ty(&self, ty: TyId) -> BasicTypeEnum<'ctx> {
+    fn lower_ty(&mut self, ty: TyId) -> BasicTypeEnum<'ctx> {
         let lowered_ty = match self.ty_ctx.get_ty(ty) {
             Ty::Int | Ty::UInt => self.ctx.i64_type().as_basic_type_enum(),
             Ty::Byte => self.ctx.i8_type().as_basic_type_enum(),
             Ty::Float => self.ctx.f64_type().as_basic_type_enum(),
             Ty::Bool => self.ctx.bool_type().as_basic_type_enum(),
             Ty::Tuple(elem_tys) => {
-                todo!()
+                let field_order = self.get_field_order(ty);
+                self.ctx
+                    .struct_type(field_types, false)
+                    .as_basic_type_enum()
             }
             Ty::Func(..) => self.closure_ty(),
             Ty::Named {
@@ -325,7 +321,7 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         self.ctx.struct_type(&field_tys, false).as_basic_type_enum()
     }
 
-    fn func_ty(&self, params: &[Param], ret_ty: TyId, env: bool) -> FunctionType<'ctx> {
+    fn func_ty(&mut self, params: &[Param], ret_ty: TyId, env: bool) -> FunctionType<'ctx> {
         let mut param_tys: Vec<_> = params
             .iter()
             .filter_map(|p| {
@@ -428,7 +424,7 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
             .unwrap()
     }
 
-    fn build_local_alloca(&self, func: &'ext Func, local: LocalId) -> PointerValue<'ctx> {
+    fn build_local_alloca(&mut self, func: &'ext Func, local: LocalId) -> PointerValue<'ctx> {
         let local = func.local(local);
 
         let name = match local.ident {
@@ -445,10 +441,8 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
             self.builder.position_at_end(head_block);
         }
 
-        let alloc = self
-            .builder
-            .build_alloca(self.lower_ty(local.ty), name)
-            .unwrap();
+        let ty = self.lower_ty(local.ty);
+        let alloc = self.builder.build_alloca(ty, name).unwrap();
         alloc
             .as_instruction_value()
             .unwrap()
@@ -467,17 +461,16 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         field: usize,
     ) -> PointerValue<'ctx> {
         let idx = self.get_field_order(ty)[field];
-        self.builder
-            .build_struct_gep(self.lower_ty(ty), base, idx, "")
-            .unwrap()
+        let ty = self.lower_ty(ty);
+        self.builder.build_struct_gep(ty, base, idx, "").unwrap()
     }
 
-    fn build_read(&self, ty: TyId, place: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
+    fn build_read(&mut self, ty: TyId, place: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
         match self.ty_ctx.get_ty(ty) {
-            Ty::Int | Ty::UInt | Ty::Byte | Ty::Bool | Ty::Float => self
-                .builder
-                .build_load(self.lower_ty(ty), place, "")
-                .unwrap(),
+            Ty::Int | Ty::UInt | Ty::Byte | Ty::Bool | Ty::Float => {
+                let ty = self.lower_ty(ty);
+                self.builder.build_load(ty, place, "").unwrap()
+            }
             Ty::Tuple(_) | Ty::Func(_, _) | Ty::Named { .. } => place.as_basic_value_enum(),
             Ty::Var(_) | Ty::IntVar(_) => panic!("ICE: Type variable in codegen"),
         }
@@ -485,6 +478,8 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
 
     fn build_store(&self, ty: TyId, dst: PointerValue<'ctx>, value: BasicValueEnum<'ctx>) {
         match self.ty_ctx.get_ty(ty) {
+            // Avoid generating actual stores of ZST types.
+            _ if self.ty_ctx.is_zst(ty) => {}
             Ty::Int | Ty::UInt | Ty::Byte | Ty::Float | Ty::Bool => {
                 self.builder.build_store(dst, value).unwrap();
             }
@@ -671,3 +666,5 @@ impl<'ext, 'ctx> CodegenState<'ext, 'ctx> {
         self.curr_block().get_parent().unwrap()
     }
 }
+
+struct FieldLayout {}
