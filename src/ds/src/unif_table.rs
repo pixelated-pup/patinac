@@ -16,11 +16,6 @@ impl<I: Id> UnifTable<I> {
         Self::default()
     }
 
-    /// Returns the number of IDs created so far.
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
     /// Creates a fresh ID.
     pub fn new_id(&mut self) -> I {
         self.0.insert_with_id(|id| VarValue {

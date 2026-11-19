@@ -6,28 +6,26 @@
 pub mod layout;
 
 use std::{
+    assert_matches,
     cell::RefCell,
     fmt::{self, Display, Formatter},
-    range::Range,
 };
 
-use ena::{
-    undo_log::NoUndo,
-    unify::{InPlaceUnificationTable, UnifyKey, VarValue},
-};
-use foldhash::fast::RandomState;
+use foldhash::fast::RandomState as FoldRandomState;
 use itertools::Itertools as _;
-use ordermap::{OrderMap, OrderSet};
+use ordermap::OrderMap;
 use slotmap::{SlotMap, new_key_type};
 
+use ds::{arena::SideArena, new_id_type, unif_table::UnifTable};
 use ident::Ident;
 
-use crate::{ModuleId, hir::VarId};
+use crate::{ModuleId, hir::VarId, ty::layout::Layout};
 
 /// Interns and unifies types.
 pub struct TyContext {
-    store: OrderSet<Ty, RandomState>,
-    unif_table: RefCell<InPlaceUnificationTable<TyId, Vec<VarValue<TyId>>, NoUndo>>,
+    store: OrderMap<Ty, TyId, FoldRandomState>,
+    unif_table: RefCell<UnifTable<TyId>>,
+    layouts: SideArena<TyId, Layout>,
     defs: SlotMap<DefId, DefInfo>,
     main: Option<DefId>,
     int: TyId,
@@ -43,16 +41,15 @@ pub struct TyContext {
     reason = "All casts are u32 -> usize, and 16-bit platforms are nostd"
 )]
 impl TyContext {
+    /// Constructs a new [`TyContext`].
     pub fn new() -> Self {
-        let mut store = OrderSet::default();
-        let mut unif_table: RefCell<InPlaceUnificationTable<TyId, Vec<VarValue<TyId>>, NoUndo>> =
-            todo!(); //RefCell::default();
+        let mut store = OrderMap::default();
+        let mut unif_table = UnifTable::default();
 
         let mut init = |ty| {
-            let (idx, _) = store.insert_full(ty);
-            let key: TyId = unif_table.get_mut().new_key(());
-            assert_eq!(key.0 as usize, idx);
-            key
+            let id: TyId = unif_table.new_id();
+            store.insert(ty, id);
+            id
         };
 
         let int = init(Ty::Int);
@@ -64,7 +61,8 @@ impl TyContext {
 
         Self {
             store,
-            unif_table,
+            unif_table: RefCell::new(unif_table),
+            layouts: SideArena::new(),
             defs: SlotMap::default(),
             main: None,
             int,
@@ -79,14 +77,9 @@ impl TyContext {
     /// Either interns the given type and returns a new ID for it,
     /// or returns it's existing ID if it's already been interned.
     pub fn intern_ty(&mut self, ty: Ty) -> TyId {
-        let (idx, exists) = self.store.insert_full(ty);
-        if exists {
-            TyId(idx.try_into().expect("too many type IDs!"))
-        } else {
-            let key = self.unif_table.get_mut().new_key(());
-            assert_eq!(key.0 as usize, idx);
-            key
-        }
+        let entry = self.store.entry(ty);
+        let id = entry.or_insert_with(|| self.unif_table.get_mut().new_id());
+        *id
     }
 
     /// Faster than `self.intern_ty(TyKind::Int)`.
@@ -121,34 +114,35 @@ impl TyContext {
 
     /// Creates a new, distinct type variable and returns it's ID.
     pub fn fresh_var(&mut self) -> TyId {
-        let key = self.unif_table.get_mut().new_key(());
-        let (idx, exists) = self.store.insert_full(Ty::Var(key));
-        assert!(!exists);
-        assert_eq!(key.0 as usize, idx);
-        key
+        let id = self.unif_table.get_mut().new_id();
+        let (idx, value) = self.store.insert_full(Ty::Var(id), id);
+        assert_matches!(value, None);
+        assert_eq!(id.0.index(), idx);
+        id
     }
 
     /// Creates a new, distinct int type variable and returns it's ID.
     pub fn fresh_int_var(&mut self) -> TyId {
-        let key = self.unif_table.get_mut().new_key(());
-        let (idx, exists) = self.store.insert_full(Ty::IntVar(key));
-        assert!(!exists);
-        assert_eq!(key.0 as usize, idx);
-        key
+        let id = self.unif_table.get_mut().new_id();
+        let (idx, value) = self.store.insert_full(Ty::IntVar(id), id);
+        assert_matches!(value, None);
+        assert_eq!(id.0.index(), idx);
+        id
     }
 
     /// Returns the type corresponding to the given ID.
     pub fn get_ty(&self, id: TyId) -> &Ty {
         let id = self.unif_table.borrow_mut().find(id);
         self.store
-            .get_index(id.0 as usize)
+            .get_index(id.0.index())
             .expect("TyId without corresponding Ty!")
+            .0
     }
 
     /// Unifies the types represented by the provided ids.
     /// Does not perform any validation, ensure the types are semantically equivalent before calling this method.
     pub fn unify(&self, a: TyId, b: TyId) {
-        self.unif_table.borrow_mut().union(a, b);
+        self.unif_table.borrow_mut().unify(a, b);
     }
 }
 
@@ -176,6 +170,12 @@ impl TyContext {
     /// Sets the main function.
     pub fn set_main(&mut self, main: DefId) {
         self.main = Some(main);
+    }
+}
+
+impl Default for TyContext {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -209,30 +209,15 @@ pub enum Parent {
     Def(DefId),
 }
 
-/// An ID representing an interned type. Information about the type can be acquired through [`Hir::ty_kind`].
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TyId(u32);
-
-impl TyId {
-    /// Wraps this `TyId` alongside a `TyContext` so that it can be displayed.
-    pub const fn display(self, ctx: &TyContext) -> TyDisplay<'_> {
-        TyDisplay(self, ctx)
-    }
+new_id_type! {
+    /// An ID representing an interned type. Information about the type can be acquired through [`TyContext::get_ty`].
+    pub struct TyId;
 }
 
-impl UnifyKey for TyId {
-    type Value = ();
-
-    fn index(&self) -> u32 {
-        self.0
-    }
-
-    fn from_index(u: u32) -> Self {
-        Self(u)
-    }
-
-    fn tag() -> &'static str {
-        "TypeVar"
+impl TyId {
+    /// Wraps this [`TyId`] alongside a [`TyContext`] so that it can be displayed.
+    pub const fn display(self, ctx: &TyContext) -> TyDisplay<'_> {
+        TyDisplay(self, ctx)
     }
 }
 
@@ -260,7 +245,7 @@ pub enum Ty {
         /// Whether the type is opaque (meaning it's fields/variants are private).
         opaque: bool,
         /// The fields of the type.
-        fields: OrderMap<Ident, TyId>,
+        fields: OrderMap<Ident, TyId, FoldRandomState>,
         /// The ID of the type's constructor function.
         ctor: VarId,
         /// The module containing the type's definition.

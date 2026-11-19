@@ -6,8 +6,8 @@ edition = "2024"
 [dependencies]
 # Internal
 ident.path = "../ident"
+ds.path = "../ds"
 # External
-ena = "0.14.3"
 derive_more = { version = "2.1.1", features = ["display", "from"] }
 foldhash = "0.2.0"
 slotmap = "1.1.1"

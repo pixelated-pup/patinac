@@ -17,16 +17,19 @@ use crate::arena::{Id, IdData};
 ///
 /// Does not perform any interning.
 #[derive(Clone)]
-pub struct SideArena<I, V>(Vec<Option<V>>, PhantomData<I>);
+pub struct SideArena<I: Id, V>(Vec<Option<V>>, PhantomData<I>);
 
-impl<I, V> SideArena<I, V> {
+impl<I: Id, V> SideArena<I, V> {
     /// Constructs a new, empty [`SideArena`].
     pub fn new() -> Self {
         Self::default()
     }
-}
 
-impl<I: Id, V> SideArena<I, V> {
+    /// Reserves space for at least `additional` more values.
+    pub fn reserve(&mut self, additional: usize) {
+        self.0.reserve(additional);
+    }
+
     /// Inserts a value corresponding to the ID.
     pub fn insert(&mut self, id: I, value: V) {
         *self.get_mut(id) = Some(value)
@@ -79,7 +82,7 @@ impl<I: Id, V> SideArena<I, V> {
     }
 }
 
-impl<I, V: Debug> Debug for SideArena<I, V> {
+impl<I: Id, V: Debug> Debug for SideArena<I, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let iter = self
             .0
@@ -90,7 +93,7 @@ impl<I, V: Debug> Debug for SideArena<I, V> {
     }
 }
 
-impl<I, V> Default for SideArena<I, V> {
+impl<I: Id, V> Default for SideArena<I, V> {
     fn default() -> Self {
         Self(Vec::new(), PhantomData)
     }
