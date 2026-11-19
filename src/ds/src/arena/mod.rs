@@ -20,21 +20,31 @@ use crate::{Id, IdData};
 ///
 /// Does not perform any interning.
 #[derive(Clone)]
-pub struct Arena<I, V>(Vec<V>, PhantomData<I>);
+pub struct Arena<I: Id, V>(Vec<V>, PhantomData<I>);
 
-impl<I, V> Arena<I, V> {
+impl<I: Id, V> Arena<I, V> {
     /// Constructs a new, empty [`Arena`].
     pub fn new() -> Self {
         Self::default()
     }
-}
 
-impl<I: Id, V> Arena<I, V> {
+    /// Reserves space for at least `additional` more values.
+    pub fn reserve(&mut self, additional: usize) {
+        self.0.reserve(additional);
+    }
+
     /// Inserts a value, returning a fresh ID corresponding to it.
     pub fn insert(&mut self, value: V) -> I {
         self.0.push(value);
         // SAFETY: The vector was just pushed to, so the length can't be zero.
         unsafe { IdData::new_raw(self.0.len()) }.into()
+    }
+
+    /// Computes a value with access to it's own ID and inserts it.
+    pub fn insert_with_id<F: FnOnce(I) -> V>(&mut self, compute_value: F) -> I {
+        let id = IdData::new(self.0.len()).into();
+        self.0.push(compute_value(id));
+        id
     }
 
     /// Returns a reference to the value corresponding to the given key.
@@ -84,13 +94,13 @@ impl<I: Id, V> Arena<I, V> {
     }
 }
 
-impl<I, V: Debug> Debug for Arena<I, V> {
+impl<I: Id, V: Debug> Debug for Arena<I, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_map().entries(self.0.iter().enumerate()).finish()
     }
 }
 
-impl<I, V> Default for Arena<I, V> {
+impl<I: Id, V> Default for Arena<I, V> {
     fn default() -> Self {
         Self(Vec::new(), PhantomData)
     }
@@ -128,6 +138,7 @@ impl<'a, I: Id, V> IntoIterator for &'a mut Arena<I, V> {
     }
 }
 
+/// See [`Arena::iter`].
 pub struct Iter<'a, I, V> {
     iter: Enumerate<slice::Iter<'a, V>>,
     _phantom: PhantomData<I>,
@@ -147,6 +158,7 @@ impl<'a, I: Id, V> Iterator for Iter<'a, I, V> {
     }
 }
 
+/// See [`Arena::iter_mut`].
 pub struct IterMut<'a, I, V> {
     iter: Enumerate<slice::IterMut<'a, V>>,
     _phantom: PhantomData<I>,

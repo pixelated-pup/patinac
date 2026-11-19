@@ -32,7 +32,7 @@ impl IdData {
 }
 
 /// Marker trait for IDs. Should not be implemented directly, use [`new_id_type`] instead.
-pub trait Id: Copy + From<IdData> + Into<IdData> {}
+pub trait Id: From<IdData> + Into<IdData> + Copy + Eq {}
 
 /// Creates a new ID type.
 #[macro_export]

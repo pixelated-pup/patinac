@@ -128,6 +128,7 @@ impl<'a, I: Id, V> IntoIterator for &'a mut SideArena<I, V> {
     }
 }
 
+/// See [`SideArena::iter`].
 pub struct Iter<'a, I, V> {
     iter: Enumerate<slice::Iter<'a, Option<V>>>,
     _phantom: PhantomData<I>,
@@ -147,6 +148,7 @@ impl<'a, I: Id, V> Iterator for Iter<'a, I, V> {
     }
 }
 
+/// See [`SideArena::iter_mut`].
 pub struct IterMut<'a, I, V> {
     iter: Enumerate<slice::IterMut<'a, Option<V>>>,
     _phantom: PhantomData<I>,
